@@ -1,0 +1,16 @@
+meta {
+  name: Ping [*]
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{MAILSERVICE_HOST}}:{{MAILSERVICE_PORT}}/api/v1/health/ping
+  body: none
+  auth: inherit
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+}

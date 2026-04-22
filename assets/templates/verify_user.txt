@@ -1,0 +1,17 @@
+Verify your email address
+
+Hi {{.Email}},
+
+Thanks for signing up! To complete your registration, please verify your email address by clicking the link below:
+
+{{.VerificationURL}}
+
+If the link doesn't work, you can copy and paste it into your browser's address bar.
+
+If you didn't create this account, you can safely ignore this message.
+
+—
+
+SwayRider Team
+{{.Year}} © All rights reserved.
+
