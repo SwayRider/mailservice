@@ -82,12 +82,12 @@ The mailservice provides two variants of each send endpoint:
 
 Returns the health status of the service.
 
-- **Endpoint:** `GET /api/v1/health/check`
+- **Endpoint:** `GET /api/v1/health`
 - **Access:** Public
 
 ```bash
 curl --request GET \
-  --url http://localhost:8080/api/v1/health/check
+  --url http://localhost:8080/api/v1/health
 ```
 
 Response:
@@ -142,12 +142,12 @@ Response:
 
 Sends an email with raw HTML and text content. Intended for internal service-to-service communication.
 
-- **Endpoint:** `POST /api/v1/mail/send-internal`
+- **Endpoint:** `POST /api/v1/mail/internal/send`
 - **Access:** Public (internal network only)
 
 ```bash
 curl --request POST \
-  --url http://localhost:8080/api/v1/mail/send-internal \
+  --url http://localhost:8080/api/v1/mail/internal/send \
   --header 'content-type: application/json' \
   --data '{
     "from": "noreply@example.com",
@@ -201,12 +201,12 @@ Response:
 
 Sends a templated email. Intended for internal service-to-service communication.
 
-- **Endpoint:** `POST /api/v1/mail/send-template-internal`
+- **Endpoint:** `POST /api/v1/mail/internal/send-template`
 - **Access:** Public (internal network only)
 
 ```bash
 curl --request POST \
-  --url http://localhost:8080/api/v1/mail/send-template-internal \
+  --url http://localhost:8080/api/v1/mail/internal/send-template \
   --header 'content-type: application/json' \
   --data '{
     "from": "noreply@example.com",
@@ -229,15 +229,6 @@ Response:
 }
 ```
 
-#### Ping
-
-Simple endpoint that returns HTTP 200.
-
-- **Endpoint:** `GET /api/v1/mail/ping`
-- **Access:** Public
-
----
-
 ## Email Templates
 
 Email templates are bundled in the container under `assets/mail/templates` and use Go's standard `html/template` and `text/template` packages. The directory can be overridden via `MAIL_TEMPLATES_DIR`.
@@ -245,13 +236,13 @@ Email templates are bundled in the container under `assets/mail/templates` and u
 ### Template Storage
 
 ```
-assets/mail/templates/
+assets/templates/
 ├── verify_user.html
 ├── verify_user.txt
 ├── reset_password.html
 ├── reset_password.txt
-├── welcome.html
-└── welcome.txt
+├── test.html
+└── test.txt
 ```
 
 ### Template Syntax
