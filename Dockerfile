@@ -35,9 +35,9 @@ RUN if [ "${TARGETARCH}" = "amd64" ]; then \
     go build -o mailservice ./cmd/mailservice/main.go
 
 # Runtime stage
-FROM debian:bookworm-slim
+FROM --platform=$TARGETPLATFORM debian:bookworm-slim
 WORKDIR /app
 COPY --from=builder /app/mailservice .
-COPY assets/mail/templates ./assets/mail/templates
-RUN apt-get update && apt-get install -y ca-certificates
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=builder /app/assets/templates ./assets/templates
 CMD ["./mailservice"]

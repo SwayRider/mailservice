@@ -3,8 +3,35 @@
 SERVICE := mailservice
 
 REGISTRY := ghcr.io/swayrider
-IMAGE := $(REGISTRY)/$(SERVICE)
-VERSION := $(shell git describe --tags --abbrev=0 2>/dev/null || echo latest)
+IMAGE    := $(REGISTRY)/$(SERVICE)
+
+VERSION_TAG    := $(shell git tag --points-at HEAD 2>/dev/null | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$$' | sort -V | tail -1)
+LAST_VERSION   := $(shell git describe --tags --match 'v[0-9]*.[0-9]*.[0-9]*' --abbrev=0 2>/dev/null || echo v0.0.0)
+CURRENT_BRANCH := $(shell git symbolic-ref --short HEAD 2>/dev/null)
+DATE_TAG       := $(shell date +%Y%m%d)
+SHORT_SHA      := $(shell git rev-parse --short HEAD 2>/dev/null)
+SAFE_BRANCH    := $(shell echo "$(CURRENT_BRANCH)" | sed 's|/|-|g; s|[^a-zA-Z0-9-]|-|g')
+
+ifneq ($(VERSION_TAG),)
+  BASE_TAG     := $(VERSION_TAG)
+  FLOATING_TAG := latest
+else ifeq ($(CURRENT_BRANCH),main)
+  BASE_TAG     := $(LAST_VERSION)-$(DATE_TAG)-dev
+  FLOATING_TAG := dev-latest
+else ifneq ($(CURRENT_BRANCH),)
+  BASE_TAG     := $(LAST_VERSION)-$(SAFE_BRANCH)
+  FLOATING_TAG :=
+else
+  BASE_TAG     := $(LAST_VERSION)-$(SHORT_SHA)
+  FLOATING_TAG :=
+endif
+
+TAGS := -t $(IMAGE):$(BASE_TAG)
+ifneq ($(FLOATING_TAG),)
+  TAGS := $(TAGS) -t $(IMAGE):$(FLOATING_TAG)
+endif
+
+.PHONY: all debug release install uninstall container-build
 
 all: debug release
 
@@ -17,33 +44,17 @@ release:
 	go build -ldflags "-s -w" -o build/release/$(SERVICE) cmd/$(SERVICE)/main.go
 
 install:
-	go install -ldflags "-s -w" hevanto-it.com/swayrider/$(SERVICE)/cmd/$(SESRVICE)
+	go install -ldflags "-s -w" hevanto-it.com/swayrider/$(SERVICE)/cmd/$(SERVICE)
 
 uninstall:
 	rm -f ~/go/bin/$(SERVICE)
 
-registry-login:
-	docker login docker-registry.hevanto-it.com
-
-container-build: registry-login
-	@echo "Building version $(VERSION)"
+container-build:
+	@echo "Building $(IMAGE):$(BASE_TAG)$(if $(FLOATING_TAG), [+$(FLOATING_TAG)])"
 	docker buildx build \
-		--progress=plain \
+		-f Dockerfile \
+		--network=host \
 		--platform linux/amd64,linux/arm64 \
-		-t $(IMAGE):latest \
-		-t $(IMAGE):$(VERSION) \
+		$(TAGS) \
 		--push .
-	@echo "Image pushed with tags latest and $(VERSION)"
-
-list-containers:
-	@read -p "Username: " username ; \
-	read -s -p "Password: " password ; \
-	curl -u "$${username}:$${password}" -X GET https://docker-registry.hevanto-it.com/v2/_catalog | jq
-
-list-tags:
-	@read -p "Username: " username ; \
-	read -s -p "Password: " password ; \
-	curl -u "$${username}:$${password}" -X GET https://docker-registry.hevanto-it.com/v2/swayrider/$(SERVICE)/tags/list | jq
-
-.PHONY: container-build
-
+	@echo "Done."
