@@ -307,9 +307,19 @@ go run ./services/mailservice/cmd/mailservice
 ## Docker
 
 ```bash
-# Build container (from repo root)
-make services-mailservice-container
+# Build container (from mailservice/ directory)
+make container-build
 ```
+
+### FORCE_DEV_LATEST
+
+By default, a release build on a version-tagged commit (e.g., `v1.2.3`) pushes two tags: the version tag and `latest`. Set `FORCE_DEV_LATEST=1` to additionally push the `dev-latest` floating tag:
+
+```bash
+FORCE_DEV_LATEST=1 make container-build
+```
+
+Use this when a release should also advance environments that track `dev-latest`.
 
 ## Development
 
