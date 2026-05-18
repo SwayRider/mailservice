@@ -5,9 +5,9 @@ go 1.26.2
 require (
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0
 	github.com/jordan-wright/email v4.0.1-0.20210109023952-943e75fe5223+incompatible
-	github.com/swayrider/grpcclients v0.1.0
-	github.com/swayrider/protos v0.1.0
-	github.com/swayrider/swlib v0.1.0
+	github.com/swayrider/grpcclients v0.1.2-0.20260513193630-fb9b503de3d0
+	github.com/swayrider/protos v0.1.1
+	github.com/swayrider/swlib v0.1.2-0.20260513190938-e9124987785d
 	google.golang.org/grpc v1.80.0
 )
 
