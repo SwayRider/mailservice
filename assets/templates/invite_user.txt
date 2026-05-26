@@ -1,0 +1,16 @@
+You've been invited to SwayRider
+
+Hi {{.Email}},
+
+You have been invited to create an account on SwayRider. Click the link below to register:
+
+{{.RegistrationURL}}
+
+If the link doesn't work, you can copy and paste it into your browser's address bar.
+
+If you didn't expect this invitation, you can safely ignore this email.
+
+—
+
+SwayRider Team
+{{.Year}} © All rights reserved.
