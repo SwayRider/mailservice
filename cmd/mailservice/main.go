@@ -74,7 +74,7 @@ Environment variables:
 const (
 	FldMailTemplatesDir = "mail-templates-dir"
 	EnvMailTemplatesDir = "MAIL_TEMPLATES_DIR"
-	DefMailTemplatesDir = "assets/mail/templates"
+	DefMailTemplatesDir = "assets/templates"
 
 	FldSmtpHost     = "smtp-host"
 	FldSmtpPort     = "smtp-port"
