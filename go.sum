@@ -194,6 +194,8 @@ github.com/swayrider/swlib v0.1.3 h1:ga/Y1zQmiUNR0I+85LRMcdw6pf+j/mLbqDmAJRIC5pc
 github.com/swayrider/swlib v0.1.3/go.mod h1:mSScpgfHXCO2K+NTCxRHA+ZPsrEJF4FGRUVU1WPLKn8=
 github.com/swayrider/swlib v0.1.4 h1:1Hl8VU5Nva7ks+IWa8xoh6p+vhDjCrSXDjmbPS7tYvw=
 github.com/swayrider/swlib v0.1.4/go.mod h1:Iv5ojh35cHoGmjNdvPPovW3i8sQBtQXmK9e2rTq4sRc=
+github.com/swayrider/swlib v0.1.5 h1:Fl68c8dbDSQ7aam6baPWmrpZcHz+w/skkn0/tfGm4FY=
+github.com/swayrider/swlib v0.1.5/go.mod h1:Iv5ojh35cHoGmjNdvPPovW3i8sQBtQXmK9e2rTq4sRc=
 github.com/tv42/httpunix v0.0.0-20150427012821-b75d8614f926/go.mod h1:9ESjWnEqriFuLhtthL60Sar/7RFoluCcXsuvEwTV5KM=
 go.opentelemetry.io/auto/sdk v1.2.1 h1:jXsnJ4Lmnqd11kwkBV2LgLoFMZKizbCi5fNZ/ipaZ64=
 go.opentelemetry.io/auto/sdk v1.2.1/go.mod h1:KRTj+aOaElaLi+wW1kO/DZRXwkF4C5xPbEe3ZiIhN7Y=
