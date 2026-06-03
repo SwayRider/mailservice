@@ -19,8 +19,13 @@ import (
 
 	healthv1 "github.com/swayrider/protos/health/v1"
 	mailv1 "github.com/swayrider/protos/mail/v1"
-	"github.com/swayrider/mailservice/internal/mail"
 )
+
+// MailSender is the interface used by MailServer to deliver emails.
+// *mail.Mailer satisfies this interface.
+type MailSender interface {
+	Send(from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error
+}
 
 func init() {
 	security.AdminEndpoint("/mail.v1.MailService/Send")
@@ -43,9 +48,9 @@ func init() {
 // It combines a filesystem templates directory and an SMTP mailer for delivery.
 type MailServer struct {
 	mailv1.UnimplementedMailServiceServer
-	templatesDir string       // Directory path for email templates
-	mailer       *mail.Mailer // SMTP mailer for email delivery
-	l            *log.Logger  // Logger instance
+	templatesDir string     // Directory path for email templates
+	mailer       MailSender // SMTP mailer for email delivery
+	l            *log.Logger // Logger instance
 }
 
 // HealthServer implements the HealthService gRPC interface for health checks.
@@ -57,7 +62,7 @@ type HealthServer struct {
 // NewMailServer creates a new MailServer with the given dependencies.
 func NewMailServer(
 	templatesDir string,
-	mailer *mail.Mailer,
+	mailer MailSender,
 	l *log.Logger,
 ) *MailServer {
 	return &MailServer{
@@ -76,7 +81,7 @@ func (s *MailServer) TemplatesDir() string {
 }
 
 // Mailer returns the SMTP mailer instance.
-func (s *MailServer) Mailer() *mail.Mailer {
+func (s *MailServer) Mailer() MailSender {
 	return s.mailer
 }
 
