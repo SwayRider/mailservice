@@ -37,7 +37,9 @@ func TestSend_SMTPUnavailable(t *testing.T) {
 		t.Fatalf("failed to allocate test port: %v", err)
 	}
 	port := l.Addr().(*net.TCPAddr).Port
-	l.Close()
+	if err := l.Close(); err != nil {
+		t.Fatalf("failed to close test listener: %v", err)
+	}
 
 	m := NewMailer("user@example.com", "password", "127.0.0.1", port)
 	err = m.Send("", []string{"to@example.com"}, nil, nil, "subject", "<b>hello</b>", "hello")
@@ -54,7 +56,9 @@ func TestSend_EmptyFromFallsBackToUser(t *testing.T) {
 		t.Fatalf("failed to allocate test port: %v", err)
 	}
 	port := l.Addr().(*net.TCPAddr).Port
-	l.Close()
+	if err := l.Close(); err != nil {
+		t.Fatalf("failed to close test listener: %v", err)
+	}
 
 	m := NewMailer("default@example.com", "password", "127.0.0.1", port)
 	// from="" triggers the fallback to m.User inside Send.
