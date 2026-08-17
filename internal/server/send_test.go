@@ -54,31 +54,6 @@ func TestSend_MailerError(t *testing.T) {
 	}
 }
 
-func TestSendInternal_DelegatesToSend(t *testing.T) {
-	var called bool
-	mailer := &mockMailer{
-		sendFn: func(from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
-			called = true
-			return nil
-		},
-	}
-	s := newTestMailServer(mailer, t.TempDir())
-
-	resp, err := s.SendInternal(context.Background(), &mailv1.SendRequest{
-		To:      []string{"recipient@example.com"},
-		Subject: "Hello",
-	})
-	if err != nil {
-		t.Fatalf("SendInternal returned unexpected error: %v", err)
-	}
-	if resp.Message != "email sent" {
-		t.Errorf("resp.Message = %q, want %q", resp.Message, "email sent")
-	}
-	if !called {
-		t.Error("expected mailer.Send to be called")
-	}
-}
-
 // =============================================================================
 // SendTemplate Tests
 // =============================================================================
@@ -311,35 +286,5 @@ func TestSendTemplate_HiddenOrEmptyTemplateName(t *testing.T) {
 		if code := status.Code(err); code != codes.InvalidArgument {
 			t.Errorf("template name %q: error code = %v, want %v", name, code, codes.InvalidArgument)
 		}
-	}
-}
-
-func TestSendTemplateInternal_DelegatesToSendTemplate(t *testing.T) {
-	var called bool
-	mailer := &mockMailer{
-		sendFn: func(from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
-			called = true
-			return nil
-		},
-	}
-	dir := writeTemplates(t, map[string]string{
-		"test.html": `<p>Hello</p>`,
-		"test.txt":  `Hello`,
-	})
-	s := newTestMailServer(mailer, dir)
-
-	resp, err := s.SendTemplateInternal(context.Background(), &mailv1.SendTemplateRequest{
-		To:           []string{"recipient@example.com"},
-		HtmlTemplate: "test.html",
-		TextTemplate: "test.txt",
-	})
-	if err != nil {
-		t.Fatalf("SendTemplateInternal returned unexpected error: %v", err)
-	}
-	if resp.Message != "email sent" {
-		t.Errorf("resp.Message = %q, want %q", resp.Message, "email sent")
-	}
-	if !called {
-		t.Error("expected mailer.Send to be called")
 	}
 }

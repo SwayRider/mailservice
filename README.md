@@ -2,7 +2,7 @@
 
 Email delivery service for the SwayRider platform. Sends transactional emails via SMTP with support for both raw content and template-based emails. Templates are bundled in the container and rendered with Go's template engine.
 
-> **Security Note:** The mailservice should not be directly exposed to the internet. It provides internal endpoints for service-to-service communication and protected endpoints for admin/service client access.
+> **Security Note:** The mailservice should not be directly exposed to the internet. All send endpoints require a valid admin JWT or service-client token with the `email:send` scope — there are no unauthenticated endpoints.
 
 ## Architecture
 
@@ -66,13 +66,13 @@ The API is defined in the Protocol Buffer files at `backend/protos/mail/v1/` and
 
 | Level | Description |
 | ----- | ----------- |
-| **Public** | No authentication required (internal service endpoints) |
+| **Public** | No authentication required (health endpoints only) |
 | **Admin** | Requires valid JWT with admin privileges |
 | **Service Client** | Requires service client token with `email:send` scope |
 
-The mailservice provides two variants of each send endpoint:
-- **Standard endpoints** (`Send`, `SendTemplate`): Protected, require admin or service client authentication
-- **Internal endpoints** (`SendInternal`, `SendTemplateInternal`): Public, intended for internal service-to-service calls within the trusted network
+Both send endpoints (`Send`, `SendTemplate`) require admin or service client authentication.
+Service-to-service callers (e.g. authservice) obtain an `email:send`-scoped token and pass it as
+`Authorization: Bearer <token>`.
 
 ---
 
@@ -138,33 +138,6 @@ Response:
 }
 ```
 
-#### Send Internal
-
-Sends an email with raw HTML and text content. Intended for internal service-to-service communication.
-
-- **Endpoint:** `POST /api/v1/mail/internal/send`
-- **Access:** Public (internal network only)
-
-```bash
-curl --request POST \
-  --url http://localhost:8080/api/v1/mail/internal/send \
-  --header 'content-type: application/json' \
-  --data '{
-    "from": "noreply@example.com",
-    "to": ["user@example.com"],
-    "subject": "Password Reset",
-    "htmlBody": "<html><body><p>Click <a href=\"...\">here</a> to reset.</p></body></html>",
-    "textBody": "Click the following link to reset your password: ..."
-  }'
-```
-
-Response:
-```json
-{
-  "message": "email sent"
-}
-```
-
 #### Send Template (Protected)
 
 Sends an email using templates read from the local filesystem. Templates are rendered with the provided data.
@@ -186,38 +159,6 @@ curl --request POST \
     "data": {
       "Name": "John Doe",
       "ActivationUrl": "https://app.example.com/activate?token=abc123"
-    }
-  }'
-```
-
-Response:
-```json
-{
-  "message": "email sent"
-}
-```
-
-#### Send Template Internal
-
-Sends a templated email. Intended for internal service-to-service communication.
-
-- **Endpoint:** `POST /api/v1/mail/internal/send-template`
-- **Access:** Public (internal network only)
-
-```bash
-curl --request POST \
-  --url http://localhost:8080/api/v1/mail/internal/send-template \
-  --header 'content-type: application/json' \
-  --data '{
-    "from": "noreply@example.com",
-    "to": ["user@example.com"],
-    "subject": "Verify Your Email",
-    "htmlTemplate": "verify_user.html",
-    "textTemplate": "verify_user.txt",
-    "data": {
-      "Email": "user@example.com",
-      "VerificationURL": "https://app.example.com/verify?u=123&t=abc",
-      "Year": "2025"
     }
   }'
 ```
@@ -286,7 +227,7 @@ The authservice uses the following templates (bundled in the container):
 
 ## Security Considerations
 
-- **Internal Endpoints**: The `*Internal` endpoints are public and should only be accessible within the trusted internal network. Ensure proper network segmentation.
+- **Service-to-Service Calls**: Callers such as authservice must obtain an `email:send`-scoped service-client token and pass it as `Authorization: Bearer <token>` — there is no unauthenticated path to any send endpoint.
 - **SMTP Credentials**: Store SMTP credentials securely using environment variables or a secrets manager.
 - **Rate Limiting**: Consider implementing rate limiting at the infrastructure level to prevent email abuse.
 

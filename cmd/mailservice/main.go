@@ -18,9 +18,8 @@
 //
 // # Endpoints
 //
-// Email endpoints have dual access patterns:
+// Email endpoints require authentication:
 //   - Send/SendTemplate: Requires admin or service client with "email:send" scope
-//   - SendInternal/SendTemplateInternal: Public (for internal service-to-service calls)
 package main
 
 import (

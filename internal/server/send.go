@@ -5,8 +5,8 @@
 //   - Template-based sending (SendTemplate): Reads templates from the local
 //     filesystem and substitutes variables before sending
 //
-// Each method has an "Internal" variant for service-to-service calls that
-// bypasses authentication.
+// Both RPCs require a service-client JWT with the "email:send" scope; see
+// security.ServiceClientEndpoint registration in server.go.
 
 package server
 
@@ -114,15 +114,6 @@ func (s *MailServer) SendTemplate(
 	}, nil
 }
 
-// SendTemplateInternal is a public endpoint for internal service-to-service calls.
-// It delegates to SendTemplate without requiring authentication.
-func (s *MailServer) SendTemplateInternal(
-	ctx context.Context,
-	req *mailv1.SendTemplateRequest,
-) (*mailv1.SendTemplateResponse, error) {
-	return s.SendTemplate(ctx, req)
-}
-
 // Send sends an email with the provided HTML and text content directly.
 //
 // Returns:
@@ -144,13 +135,4 @@ func (s *MailServer) Send(
 	return &mailv1.SendResponse{
 		Message: "email sent",
 	}, nil
-}
-
-// SendInternal is a public endpoint for internal service-to-service calls.
-// It delegates to Send without requiring authentication.
-func (s *MailServer) SendInternal(
-	ctx context.Context,
-	req *mailv1.SendRequest,
-) (*mailv1.SendResponse, error) {
-	return s.Send(ctx, req)
 }

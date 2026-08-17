@@ -7,9 +7,9 @@
 // # Endpoint Security
 //
 // Endpoints are registered with different security levels in init():
-//   - Public: SendInternal, SendTemplateInternal (for service-to-service calls)
 //   - Admin: Send, SendTemplate (for authenticated admin users)
-//   - ServiceClient: Send, SendTemplate with "email:send" scope
+//   - ServiceClient: Send, SendTemplate with "email:send" scope (for
+//     service-to-service calls, e.g. from authservice)
 
 package server
 
@@ -32,13 +32,11 @@ func init() {
 	security.ServiceClientEndpoint("/mail.v1.MailService/Send", []string{
 		"email:send",
 	})
-	security.PublicEndpoint("/mail.v1.MailService/SendInternal")
 
 	security.AdminEndpoint("/mail.v1.MailService/SendTemplate")
 	security.ServiceClientEndpoint("/mail.v1.MailService/SendTemplate", []string{
 		"email:send",
 	})
-	security.PublicEndpoint("/mail.v1.MailService/SendTemplateInternal")
 
 	security.PublicEndpoint("/health.v1.HealthService/Ping")
 	security.PublicEndpoint("/health.v1.HealthService/Check")
