@@ -220,6 +220,100 @@ func TestSendTemplate_MailerError(t *testing.T) {
 	}
 }
 
+func TestSendTemplate_PathTraversalHTMLTemplate(t *testing.T) {
+	var called bool
+	mailer := &mockMailer{
+		sendFn: func(from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
+			called = true
+			return nil
+		},
+	}
+	dir := writeTemplates(t, map[string]string{
+		"test.txt": `Hello`,
+	})
+	s := newTestMailServer(mailer, dir)
+
+	_, err := s.SendTemplate(context.Background(), &mailv1.SendTemplateRequest{
+		HtmlTemplate: "../../../../etc/passwd",
+		TextTemplate: "test.txt",
+	})
+	if err == nil {
+		t.Fatal("expected error for path traversal in HTML template, got nil")
+	}
+	if code := status.Code(err); code != codes.InvalidArgument {
+		t.Errorf("error code = %v, want %v", code, codes.InvalidArgument)
+	}
+	if called {
+		t.Error("mailer.Send should not be called for a rejected template name")
+	}
+}
+
+func TestSendTemplate_PathTraversalTextTemplate(t *testing.T) {
+	var called bool
+	mailer := &mockMailer{
+		sendFn: func(from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
+			called = true
+			return nil
+		},
+	}
+	dir := writeTemplates(t, map[string]string{
+		"test.html": `<p>Hello</p>`,
+	})
+	s := newTestMailServer(mailer, dir)
+
+	_, err := s.SendTemplate(context.Background(), &mailv1.SendTemplateRequest{
+		HtmlTemplate: "test.html",
+		TextTemplate: "../../../../etc/passwd",
+	})
+	if err == nil {
+		t.Fatal("expected error for path traversal in text template, got nil")
+	}
+	if code := status.Code(err); code != codes.InvalidArgument {
+		t.Errorf("error code = %v, want %v", code, codes.InvalidArgument)
+	}
+	if called {
+		t.Error("mailer.Send should not be called for a rejected template name")
+	}
+}
+
+func TestSendTemplate_AbsolutePathTemplate(t *testing.T) {
+	dir := writeTemplates(t, map[string]string{
+		"test.txt": `Hello`,
+	})
+	s := newTestMailServer(&mockMailer{}, dir)
+
+	_, err := s.SendTemplate(context.Background(), &mailv1.SendTemplateRequest{
+		HtmlTemplate: "/etc/passwd",
+		TextTemplate: "test.txt",
+	})
+	if err == nil {
+		t.Fatal("expected error for absolute path template, got nil")
+	}
+	if code := status.Code(err); code != codes.InvalidArgument {
+		t.Errorf("error code = %v, want %v", code, codes.InvalidArgument)
+	}
+}
+
+func TestSendTemplate_HiddenOrEmptyTemplateName(t *testing.T) {
+	dir := writeTemplates(t, map[string]string{
+		"test.txt": `Hello`,
+	})
+	s := newTestMailServer(&mockMailer{}, dir)
+
+	for _, name := range []string{"", ".hidden"} {
+		_, err := s.SendTemplate(context.Background(), &mailv1.SendTemplateRequest{
+			HtmlTemplate: name,
+			TextTemplate: "test.txt",
+		})
+		if err == nil {
+			t.Fatalf("expected error for HTML template name %q, got nil", name)
+		}
+		if code := status.Code(err); code != codes.InvalidArgument {
+			t.Errorf("template name %q: error code = %v, want %v", name, code, codes.InvalidArgument)
+		}
+	}
+}
+
 func TestSendTemplateInternal_DelegatesToSendTemplate(t *testing.T) {
 	var called bool
 	mailer := &mockMailer{

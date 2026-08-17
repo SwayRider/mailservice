@@ -16,6 +16,8 @@ import (
 	htmlTemp "html/template"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	txtTemp "text/template"
 
 	"google.golang.org/grpc/codes"
@@ -23,6 +25,19 @@ import (
 	mailv1 "github.com/swayrider/protos/mail/v1"
 	log "github.com/swayrider/swlib/logger"
 )
+
+// templateNameRe restricts template names to flat basenames: an alphanumeric
+// first character followed by alphanumerics, underscore, dot, or hyphen. This
+// blocks path separators, leading dots, and empty names.
+var templateNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+
+// validTemplateName reports whether name is safe to join onto the templates
+// directory. Real template names are always flat basenames (e.g.
+// "verify_user.html"), so anything containing a path separator or ".." is
+// rejected outright to prevent path traversal.
+func validTemplateName(name string) bool {
+	return templateNameRe.MatchString(name) && !strings.Contains(name, "..")
+}
 
 // SendTemplate sends an email using templates read from the local filesystem.
 //
@@ -40,6 +55,15 @@ func (s *MailServer) SendTemplate(
 	req *mailv1.SendTemplateRequest,
 ) (*mailv1.SendTemplateResponse, error) {
 	lg := s.Logger().Derive(log.WithFunction("SendTemplate"))
+
+	if !validTemplateName(req.HtmlTemplate) {
+		lg.Errorf("invalid HTML template name: %q", req.HtmlTemplate)
+		return nil, status.Error(codes.InvalidArgument, "invalid template name")
+	}
+	if !validTemplateName(req.TextTemplate) {
+		lg.Errorf("invalid text template name: %q", req.TextTemplate)
+		return nil, status.Error(codes.InvalidArgument, "invalid template name")
+	}
 
 	htmlBytes, err := os.ReadFile(filepath.Join(s.TemplatesDir(), req.HtmlTemplate))
 	if err != nil {
