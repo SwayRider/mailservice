@@ -9,34 +9,59 @@
 package mail
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
 	netmail "net/mail"
 	"net/smtp"
+	"time"
 
 	"github.com/jordan-wright/email"
 )
 
+// defaultDialTimeout bounds how long connecting to the SMTP server may take.
+const defaultDialTimeout = 5 * time.Second
+
+// defaultOverallTimeout bounds the entire SMTP transaction (EHLO, STARTTLS,
+// AUTH, RCPT, DATA) once connected, since net/smtp has no per-step context
+// support and a hung server could otherwise block a goroutine indefinitely.
+const defaultOverallTimeout = 30 * time.Second
+
 // Mailer holds SMTP connection configuration for sending emails.
 type Mailer struct {
-	User     string // SMTP username (also used as default From address)
-	Password string // SMTP password
-	Host     string // SMTP server hostname
-	Port     int    // SMTP server port (typically 587 for TLS)
+	User           string        // SMTP username (also used as default From address)
+	Password       string        // SMTP password
+	Host           string        // SMTP server hostname
+	Port           int           // SMTP server port (typically 587 for TLS)
+	DialTimeout    time.Duration // Timeout for establishing the TCP connection
+	OverallTimeout time.Duration // Timeout for the entire SMTP transaction once connected
 }
 
 // NewMailer creates a new Mailer with the given SMTP configuration.
+//
+// dialTimeout and overallTimeout fall back to sane defaults when zero.
 func NewMailer(
 	user string,
 	password string,
 	host string,
 	port int,
+	dialTimeout time.Duration,
+	overallTimeout time.Duration,
 ) *Mailer {
+	if dialTimeout == 0 {
+		dialTimeout = defaultDialTimeout
+	}
+	if overallTimeout == 0 {
+		overallTimeout = defaultOverallTimeout
+	}
 	return &Mailer{
-		User:     user,
-		Password: password,
-		Host:     host,
-		Port:     port,
+		User:           user,
+		Password:       password,
+		Host:           host,
+		Port:           port,
+		DialTimeout:    dialTimeout,
+		OverallTimeout: overallTimeout,
 	}
 }
 
@@ -47,8 +72,10 @@ func NewMailer(
 //
 // The connection is upgraded via STARTTLS before the SMTP credentials are
 // sent; if the server doesn't advertise STARTTLS, Send fails rather than
-// authenticating over a plaintext channel.
+// authenticating over a plaintext channel. Connecting honors ctx; the
+// transaction as a whole is bounded by m.OverallTimeout.
 func (m *Mailer) Send(
+	ctx context.Context,
 	from string,
 	to []string,
 	cc []string,
@@ -70,7 +97,7 @@ func (m *Mailer) Send(
 	e.HTML = []byte(htmlBody)
 	e.Text = []byte(textBody)
 
-	return m.sendWithMandatorySTARTTLS(e)
+	return m.sendWithMandatorySTARTTLS(ctx, e)
 }
 
 // sendWithMandatorySTARTTLS delivers e over a connection that has been
@@ -82,7 +109,12 @@ func (m *Mailer) Send(
 // SMTP transaction (adapted from email.Email.SendWithStartTLS, itself
 // adapted from net/smtp.SendMail) but refuses to authenticate or send
 // unless the STARTTLS upgrade succeeds first.
-func (m *Mailer) sendWithMandatorySTARTTLS(e *email.Email) error {
+//
+// Connecting honors ctx (bounded additionally by m.DialTimeout); once
+// connected, the whole transaction is bounded by m.OverallTimeout via a
+// deadline on the raw connection, since net/smtp has no per-step context
+// support and a hung server could otherwise block indefinitely.
+func (m *Mailer) sendWithMandatorySTARTTLS(ctx context.Context, e *email.Email) error {
 	sender, err := netmail.ParseAddress(e.From)
 	if err != nil {
 		return fmt.Errorf("parse from address: %w", err)
@@ -97,9 +129,20 @@ func (m *Mailer) sendWithMandatorySTARTTLS(e *email.Email) error {
 	}
 
 	addr := fmt.Sprintf("%s:%d", m.Host, m.Port)
-	c, err := smtp.Dial(addr)
+	dialer := &net.Dialer{Timeout: m.DialTimeout}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("dial smtp server: %w", err)
+	}
+	if err := conn.SetDeadline(time.Now().Add(m.OverallTimeout)); err != nil {
+		conn.Close()
+		return fmt.Errorf("set smtp connection deadline: %w", err)
+	}
+
+	c, err := smtp.NewClient(conn, m.Host)
+	if err != nil {
+		conn.Close()
+		return fmt.Errorf("init smtp client: %w", err)
 	}
 	defer c.Close()
 

@@ -1,10 +1,12 @@
 package server
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	log "github.com/swayrider/swlib/logger"
 )
@@ -18,8 +20,10 @@ func newTestMailServer(mailer MailSender, templatesDir string) *MailServer {
 	return NewMailServer(templatesDir, mailer, []string{"example.com"}, log.New())
 }
 
-func newTestHealthServer() *HealthServer {
-	return NewHealthServer(log.New())
+// newTestHealthServer creates a HealthServer that probes smtpHost:smtpPort,
+// caching results for probeTTL.
+func newTestHealthServer(smtpHost string, smtpPort int, probeTTL time.Duration) *HealthServer {
+	return NewHealthServer(smtpHost, smtpPort, probeTTL, log.New())
 }
 
 // =============================================================================
@@ -27,12 +31,12 @@ func newTestHealthServer() *HealthServer {
 // =============================================================================
 
 type mockMailer struct {
-	sendFn func(from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error
+	sendFn func(ctx context.Context, from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error
 }
 
-func (m *mockMailer) Send(from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
+func (m *mockMailer) Send(ctx context.Context, from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
 	if m.sendFn != nil {
-		return m.sendFn(from, to, cc, bcc, subject, htmlBody, textBody)
+		return m.sendFn(ctx, from, to, cc, bcc, subject, htmlBody, textBody)
 	}
 	return nil
 }

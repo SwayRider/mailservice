@@ -26,19 +26,20 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
-	"google.golang.org/grpc"
 	"github.com/swayrider/grpcclients"
 	"github.com/swayrider/grpcclients/authclient"
-	healthv1 "github.com/swayrider/protos/health/v1"
-	mailv1 "github.com/swayrider/protos/mail/v1"
 	"github.com/swayrider/mailservice/internal/mail"
 	"github.com/swayrider/mailservice/internal/repository"
 	"github.com/swayrider/mailservice/internal/server"
+	healthv1 "github.com/swayrider/protos/health/v1"
+	mailv1 "github.com/swayrider/protos/mail/v1"
 	"github.com/swayrider/swlib/app"
 	"github.com/swayrider/swlib/cache"
 	log "github.com/swayrider/swlib/logger"
+	"google.golang.org/grpc"
 )
 
 /*
@@ -93,6 +94,18 @@ const (
 	DefSmtpUser     = ""
 	DefSmtpPassword = ""
 
+	FldSmtpDialTimeoutSecs = "smtp-dial-timeout-secs"
+	EnvSmtpDialTimeoutSecs = "SMTP_DIAL_TIMEOUT_SECS"
+	DefSmtpDialTimeoutSecs = 5
+
+	FldSmtpTimeoutSecs = "smtp-timeout-secs"
+	EnvSmtpTimeoutSecs = "SMTP_TIMEOUT_SECS"
+	DefSmtpTimeoutSecs = 30
+
+	FldHealthProbeTtlSecs = "health-probe-ttl-secs"
+	EnvHealthProbeTTLSecs = "HEALTH_PROBE_TTL_SECS"
+	DefHealthProbeTtlSecs = 15
+
 	FldMailAllowedFromDomains = "mail-allowed-from-domains"
 	EnvMailAllowedFromDomains = "MAIL_ALLOWED_FROM_DOMAINS"
 	DefMailAllowedFromDomains = ""
@@ -117,6 +130,16 @@ func main() {
 				FldSmtpUser, EnvSmtpUser, "SMTP user", DefSmtpUser),
 			app.NewStringConfigField(
 				FldSmtpPassword, EnvSmtpPassword, "SMTP password", DefSmtpPassword),
+			app.NewIntConfigField(
+				FldSmtpDialTimeoutSecs, EnvSmtpDialTimeoutSecs,
+				"Timeout in seconds for establishing the SMTP connection", DefSmtpDialTimeoutSecs),
+			app.NewIntConfigField(
+				FldSmtpTimeoutSecs, EnvSmtpTimeoutSecs,
+				"Timeout in seconds for the entire SMTP transaction", DefSmtpTimeoutSecs),
+			app.NewIntConfigField(
+				FldHealthProbeTtlSecs, EnvHealthProbeTTLSecs,
+				"How long in seconds a health probe result is cached before re-probing SMTP",
+				DefHealthProbeTtlSecs),
 			app.NewStringConfigField(
 				FldMailAllowedFromDomains, EnvMailAllowedFromDomains,
 				"Comma-separated list of domains allowed in the request From address "+
@@ -218,11 +241,16 @@ func grpcMailRegistrar(r grpc.ServiceRegistrar, a app.App) {
 	password := app.GetConfigField[string](a.Config(), FldSmtpPassword)
 	host := app.GetConfigField[string](a.Config(), FldSmtpHost)
 	port := app.GetConfigField[int](a.Config(), FldSmtpPort)
+	dialTimeoutSecs := app.GetConfigField[int](a.Config(), FldSmtpDialTimeoutSecs)
+	timeoutSecs := app.GetConfigField[int](a.Config(), FldSmtpTimeoutSecs)
 	allowedFromDomains := app.GetConfigField[string](a.Config(), FldMailAllowedFromDomains)
 
 	srv := server.NewMailServer(
 		templatesDir,
-		mail.NewMailer(user, password, host, port),
+		mail.NewMailer(
+			user, password, host, port,
+			time.Duration(dialTimeoutSecs)*time.Second,
+			time.Duration(timeoutSecs)*time.Second),
 		resolveAllowedFromDomains(allowedFromDomains, user, a.Logger()),
 		a.Logger())
 	mailv1.RegisterMailServiceServer(r, srv)
@@ -254,7 +282,11 @@ func resolveAllowedFromDomains(configured string, smtpUser string, l *log.Logger
 
 // grpcHealthRegistrar registers the HealthService gRPC server with the registrar.
 func grpcHealthRegistrar(r grpc.ServiceRegistrar, a app.App) {
-	srv := server.NewHealthServer(a.Logger())
+	host := app.GetConfigField[string](a.Config(), FldSmtpHost)
+	port := app.GetConfigField[int](a.Config(), FldSmtpPort)
+	probeTTLSecs := app.GetConfigField[int](a.Config(), FldHealthProbeTtlSecs)
+
+	srv := server.NewHealthServer(host, port, time.Duration(probeTTLSecs)*time.Second, a.Logger())
 	healthv1.RegisterHealthServiceServer(r, srv)
 }
 

@@ -14,6 +14,12 @@
 package server
 
 import (
+	"context"
+	"net"
+	"strconv"
+	"sync"
+	"time"
+
 	log "github.com/swayrider/swlib/logger"
 	"github.com/swayrider/swlib/security"
 
@@ -24,7 +30,7 @@ import (
 // MailSender is the interface used by MailServer to deliver emails.
 // *mail.Mailer satisfies this interface.
 type MailSender interface {
-	Send(from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error
+	Send(ctx context.Context, from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error
 }
 
 func init() {
@@ -46,16 +52,26 @@ func init() {
 // It combines a filesystem templates directory and an SMTP mailer for delivery.
 type MailServer struct {
 	mailv1.UnimplementedMailServiceServer
-	templatesDir       string     // Directory path for email templates
-	mailer             MailSender // SMTP mailer for email delivery
-	allowedFromDomains []string   // Domains permitted in the request From address
+	templatesDir       string      // Directory path for email templates
+	mailer             MailSender  // SMTP mailer for email delivery
+	allowedFromDomains []string    // Domains permitted in the request From address
 	l                  *log.Logger // Logger instance
 }
 
 // HealthServer implements the HealthService gRPC interface for health checks.
+//
+// Check() probes SMTP reachability rather than reporting UP unconditionally,
+// caching the result for probeTTL to avoid dialing the SMTP server on every
+// orchestrator health check.
 type HealthServer struct {
 	healthv1.UnimplementedHealthServiceServer
-	l *log.Logger // Logger instance
+	smtpAddr string        // SMTP server host:port
+	probeTTL time.Duration // How long a probe result is reused before re-probing
+	l        *log.Logger   // Logger instance
+
+	mu        sync.Mutex
+	lastCheck time.Time
+	lastUp    bool
 }
 
 // NewMailServer creates a new MailServer with the given dependencies.
@@ -95,9 +111,12 @@ func (s *MailServer) Logger() *log.Logger {
 	return s.l
 }
 
-// NewHealthServer creates a new HealthServer with the given logger.
-func NewHealthServer(l *log.Logger) *HealthServer {
+// NewHealthServer creates a new HealthServer that probes the SMTP server at
+// smtpHost:smtpPort, caching the result for probeTTL.
+func NewHealthServer(smtpHost string, smtpPort int, probeTTL time.Duration, l *log.Logger) *HealthServer {
 	return &HealthServer{
+		smtpAddr: net.JoinHostPort(smtpHost, strconv.Itoa(smtpPort)),
+		probeTTL: probeTTL,
 		l: l.Derive(
 			log.WithComponent("HealthServer"),
 			log.WithFunction("NewHealthServer"),

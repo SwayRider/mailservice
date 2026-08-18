@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"context"
 	"net"
 	"net/textproto"
 	"strings"
@@ -13,7 +14,7 @@ import (
 // =============================================================================
 
 func TestNewMailer(t *testing.T) {
-	m := NewMailer("user@example.com", "secret", "smtp.example.com", 587)
+	m := NewMailer("user@example.com", "secret", "smtp.example.com", 587, 2*time.Second, 10*time.Second)
 
 	if m.User != "user@example.com" {
 		t.Errorf("User = %q, want %q", m.User, "user@example.com")
@@ -26,6 +27,23 @@ func TestNewMailer(t *testing.T) {
 	}
 	if m.Port != 587 {
 		t.Errorf("Port = %d, want %d", m.Port, 587)
+	}
+	if m.DialTimeout != 2*time.Second {
+		t.Errorf("DialTimeout = %v, want %v", m.DialTimeout, 2*time.Second)
+	}
+	if m.OverallTimeout != 10*time.Second {
+		t.Errorf("OverallTimeout = %v, want %v", m.OverallTimeout, 10*time.Second)
+	}
+}
+
+func TestNewMailer_DefaultsWhenZero(t *testing.T) {
+	m := NewMailer("user@example.com", "secret", "smtp.example.com", 587, 0, 0)
+
+	if m.DialTimeout != defaultDialTimeout {
+		t.Errorf("DialTimeout = %v, want default %v", m.DialTimeout, defaultDialTimeout)
+	}
+	if m.OverallTimeout != defaultOverallTimeout {
+		t.Errorf("OverallTimeout = %v, want default %v", m.OverallTimeout, defaultOverallTimeout)
 	}
 }
 
@@ -44,8 +62,8 @@ func TestSend_SMTPUnavailable(t *testing.T) {
 		t.Fatalf("failed to close test listener: %v", err)
 	}
 
-	m := NewMailer("user@example.com", "password", "127.0.0.1", port)
-	err = m.Send("", []string{"to@example.com"}, nil, nil, "subject", "<b>hello</b>", "hello")
+	m := NewMailer("user@example.com", "password", "127.0.0.1", port, 0, 0)
+	err = m.Send(context.Background(), "", []string{"to@example.com"}, nil, nil, "subject", "<b>hello</b>", "hello")
 	if err == nil {
 		t.Error("expected error sending to unavailable SMTP server, got nil")
 	}
@@ -63,9 +81,9 @@ func TestSend_EmptyFromFallsBackToUser(t *testing.T) {
 		t.Fatalf("failed to close test listener: %v", err)
 	}
 
-	m := NewMailer("default@example.com", "password", "127.0.0.1", port)
+	m := NewMailer("default@example.com", "password", "127.0.0.1", port, 0, 0)
 	// from="" triggers the fallback to m.User inside Send.
-	err = m.Send("", []string{"to@example.com"}, nil, nil, "subject", "<b>hello</b>", "hello")
+	err = m.Send(context.Background(), "", []string{"to@example.com"}, nil, nil, "subject", "<b>hello</b>", "hello")
 	if err == nil {
 		t.Error("expected SMTP error, got nil")
 	}
@@ -74,8 +92,8 @@ func TestSend_EmptyFromFallsBackToUser(t *testing.T) {
 func TestSend_RefusesWhenServerDoesNotAdvertiseSTARTTLS(t *testing.T) {
 	host, port, authSeen := startFakeSMTPServer(t, false /* advertiseStartTLS */)
 
-	m := NewMailer("user@example.com", "password", host, port)
-	err := m.Send("", []string{"to@example.com"}, nil, nil, "subject", "<b>hello</b>", "hello")
+	m := NewMailer("user@example.com", "password", host, port, 0, 0)
+	err := m.Send(context.Background(), "", []string{"to@example.com"}, nil, nil, "subject", "<b>hello</b>", "hello")
 	if err == nil {
 		t.Fatal("expected error when server does not advertise STARTTLS, got nil")
 	}
@@ -87,6 +105,53 @@ func TestSend_RefusesWhenServerDoesNotAdvertiseSTARTTLS(t *testing.T) {
 	case cmd := <-authSeen:
 		t.Errorf("AUTH command sent despite missing STARTTLS support: %q", cmd)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestSend_RespectsCanceledContext(t *testing.T) {
+	host, port, _ := startFakeSMTPServer(t, true /* advertiseStartTLS */)
+
+	m := NewMailer("user@example.com", "password", host, port, 0, 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := m.Send(ctx, "", []string{"to@example.com"}, nil, nil, "subject", "<b>hello</b>", "hello")
+	if err == nil {
+		t.Fatal("expected error when context is already canceled, got nil")
+	}
+}
+
+func TestSend_RespectsOverallTimeout(t *testing.T) {
+	// A server that accepts the connection but never writes a greeting, so
+	// the client blocks reading it -- the overall connection deadline is
+	// the only thing that can unblock Send.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	t.Cleanup(func() { l.Close() })
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		<-make(chan struct{}) // block forever, holding the connection open
+	}()
+
+	addr := l.Addr().(*net.TCPAddr)
+	m := NewMailer("user@example.com", "password", "127.0.0.1", addr.Port, time.Second, 50*time.Millisecond)
+
+	start := time.Now()
+	err = m.Send(context.Background(), "", []string{"to@example.com"}, nil, nil, "subject", "<b>hello</b>", "hello")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("Send took %v, expected it to be bounded by the overall timeout", elapsed)
 	}
 }
 

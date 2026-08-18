@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	mailv1 "github.com/swayrider/protos/mail/v1"
@@ -36,7 +37,7 @@ func TestSend_Success(t *testing.T) {
 func TestSend_RejectsDisallowedFromDomain(t *testing.T) {
 	var called bool
 	mailer := &mockMailer{
-		sendFn: func(from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
+		sendFn: func(ctx context.Context, from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
 			called = true
 			return nil
 		},
@@ -116,7 +117,7 @@ func TestSend_RejectsInvalidRecipientAddress(t *testing.T) {
 func TestSend_MailerError(t *testing.T) {
 	smtpErr := errors.New("smtp: connection refused")
 	mailer := &mockMailer{
-		sendFn: func(from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
+		sendFn: func(ctx context.Context, from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
 			return smtpErr
 		},
 	}
@@ -132,6 +133,9 @@ func TestSend_MailerError(t *testing.T) {
 	if code := status.Code(err); code != codes.Internal {
 		t.Errorf("error code = %v, want %v", code, codes.Internal)
 	}
+	if strings.Contains(status.Convert(err).Message(), smtpErr.Error()) {
+		t.Errorf("error message leaks the raw SMTP error: %v", err)
+	}
 }
 
 // =============================================================================
@@ -141,7 +145,7 @@ func TestSend_MailerError(t *testing.T) {
 func TestSendTemplate_Success(t *testing.T) {
 	var gotHTML, gotText string
 	mailer := &mockMailer{
-		sendFn: func(from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
+		sendFn: func(ctx context.Context, from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
 			gotHTML = htmlBody
 			gotText = textBody
 			return nil
@@ -178,7 +182,7 @@ func TestSendTemplate_Success(t *testing.T) {
 func TestSendTemplate_RejectsDisallowedFromDomain(t *testing.T) {
 	var called bool
 	mailer := &mockMailer{
-		sendFn: func(from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
+		sendFn: func(ctx context.Context, from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
 			called = true
 			return nil
 		},
@@ -252,14 +256,18 @@ func TestSendTemplate_MissingHTMLTemplate(t *testing.T) {
 	s := newTestMailServer(&mockMailer{}, dir)
 
 	_, err := s.SendTemplate(context.Background(), &mailv1.SendTemplateRequest{
+		To:           []string{"recipient@example.com"},
 		HtmlTemplate: "missing.html",
 		TextTemplate: "test.txt",
 	})
 	if err == nil {
 		t.Fatal("expected error for missing HTML template, got nil")
 	}
-	if code := status.Code(err); code != codes.InvalidArgument {
-		t.Errorf("error code = %v, want %v", code, codes.InvalidArgument)
+	if code := status.Code(err); code != codes.NotFound {
+		t.Errorf("error code = %v, want %v", code, codes.NotFound)
+	}
+	if strings.Contains(status.Convert(err).Message(), dir) {
+		t.Errorf("error message leaks the templates directory path: %v", err)
 	}
 }
 
@@ -270,14 +278,18 @@ func TestSendTemplate_MissingTextTemplate(t *testing.T) {
 	s := newTestMailServer(&mockMailer{}, dir)
 
 	_, err := s.SendTemplate(context.Background(), &mailv1.SendTemplateRequest{
+		To:           []string{"recipient@example.com"},
 		HtmlTemplate: "test.html",
 		TextTemplate: "missing.txt",
 	})
 	if err == nil {
 		t.Fatal("expected error for missing text template, got nil")
 	}
-	if code := status.Code(err); code != codes.InvalidArgument {
-		t.Errorf("error code = %v, want %v", code, codes.InvalidArgument)
+	if code := status.Code(err); code != codes.NotFound {
+		t.Errorf("error code = %v, want %v", code, codes.NotFound)
+	}
+	if strings.Contains(status.Convert(err).Message(), dir) {
+		t.Errorf("error message leaks the templates directory path: %v", err)
 	}
 }
 
@@ -300,6 +312,9 @@ func TestSendTemplate_InvalidHTMLTemplateSyntax(t *testing.T) {
 	if code := status.Code(err); code != codes.Internal {
 		t.Errorf("error code = %v, want %v", code, codes.Internal)
 	}
+	if strings.Contains(status.Convert(err).Message(), "range") {
+		t.Errorf("error message leaks raw template parse error: %v", err)
+	}
 }
 
 func TestSendTemplate_InvalidTextTemplateSyntax(t *testing.T) {
@@ -320,12 +335,16 @@ func TestSendTemplate_InvalidTextTemplateSyntax(t *testing.T) {
 	if code := status.Code(err); code != codes.Internal {
 		t.Errorf("error code = %v, want %v", code, codes.Internal)
 	}
+	if strings.Contains(status.Convert(err).Message(), "range") {
+		t.Errorf("error message leaks raw template parse error: %v", err)
+	}
 }
 
 func TestSendTemplate_MailerError(t *testing.T) {
+	smtpErr := errors.New("smtp: connection refused")
 	mailer := &mockMailer{
-		sendFn: func(from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
-			return errors.New("smtp: connection refused")
+		sendFn: func(ctx context.Context, from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
+			return smtpErr
 		},
 	}
 	dir := writeTemplates(t, map[string]string{
@@ -345,12 +364,15 @@ func TestSendTemplate_MailerError(t *testing.T) {
 	if code := status.Code(err); code != codes.Internal {
 		t.Errorf("error code = %v, want %v", code, codes.Internal)
 	}
+	if strings.Contains(status.Convert(err).Message(), smtpErr.Error()) {
+		t.Errorf("error message leaks the raw SMTP error: %v", err)
+	}
 }
 
 func TestSendTemplate_PathTraversalHTMLTemplate(t *testing.T) {
 	var called bool
 	mailer := &mockMailer{
-		sendFn: func(from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
+		sendFn: func(ctx context.Context, from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
 			called = true
 			return nil
 		},
@@ -378,7 +400,7 @@ func TestSendTemplate_PathTraversalHTMLTemplate(t *testing.T) {
 func TestSendTemplate_PathTraversalTextTemplate(t *testing.T) {
 	var called bool
 	mailer := &mockMailer{
-		sendFn: func(from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
+		sendFn: func(ctx context.Context, from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
 			called = true
 			return nil
 		},

@@ -20,10 +20,10 @@ import (
 	"strings"
 	txtTemp "text/template"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	mailv1 "github.com/swayrider/protos/mail/v1"
 	log "github.com/swayrider/swlib/logger"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // templateNameRe restricts template names to flat basenames: an alphanumeric
@@ -48,7 +48,8 @@ func validTemplateName(name string) bool {
 //  4. Sends the resulting email via SMTP
 //
 // Returns:
-//   - codes.InvalidArgument: Template not found in object store
+//   - codes.InvalidArgument: Invalid template name, from address, or recipients
+//   - codes.NotFound: Template not found
 //   - codes.Internal: Template parsing, execution, or SMTP error
 func (s *MailServer) SendTemplate(
 	ctx context.Context,
@@ -77,45 +78,45 @@ func (s *MailServer) SendTemplate(
 	htmlBytes, err := os.ReadFile(filepath.Join(s.TemplatesDir(), req.HtmlTemplate))
 	if err != nil {
 		lg.Errorf("failed to get HTML template %s, error: %v", req.HtmlTemplate, err)
-		return nil, status.Error(codes.InvalidArgument, err.Error())
+		return nil, status.Error(codes.NotFound, "template not found")
 	}
 	htmlTemplateContent := string(htmlBytes)
 
 	txtBytes, err := os.ReadFile(filepath.Join(s.TemplatesDir(), req.TextTemplate))
 	if err != nil {
 		lg.Errorf("failed to get Text template %s, error: %v", req.TextTemplate, err)
-		return nil, status.Error(codes.InvalidArgument, err.Error())
+		return nil, status.Error(codes.NotFound, "template not found")
 	}
 	txtTemplateContent := string(txtBytes)
 
 	htmlTmpl, err := htmlTemp.New("").Parse(htmlTemplateContent)
 	if err != nil {
 		lg.Errorf("failed to parse HTML template %s, error: %v", req.HtmlTemplate, err)
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, status.Error(codes.Internal, "failed to parse template")
 	}
 
 	txtTmpl, err := txtTemp.New("").Parse(txtTemplateContent)
 	if err != nil {
 		lg.Errorf("failed to parse Text template %s, error: %v", req.TextTemplate, err)
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, status.Error(codes.Internal, "failed to parse template")
 	}
 
 	var htmlBuf, txtBuf bytes.Buffer
 	if err := htmlTmpl.Execute(&htmlBuf, req.Data); err != nil {
 		lg.Errorf("failed to execute template %s, error: %v", req.HtmlTemplate, err)
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, status.Error(codes.Internal, "failed to render template")
 	}
 	if err := txtTmpl.Execute(&txtBuf, req.Data); err != nil {
 		lg.Errorf("failed to execute template %s, error: %v", req.TextTemplate, err)
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, status.Error(codes.Internal, "failed to render template")
 	}
 
 	if err := s.Mailer().Send(
-		req.From, req.To, req.Cc, req.Bcc, req.Subject,
+		ctx, req.From, req.To, req.Cc, req.Bcc, req.Subject,
 		htmlBuf.String(), txtBuf.String(),
 	); err != nil {
 		lg.Errorf("failed to send email, error: %v", err)
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, status.Error(codes.Internal, "failed to send email")
 	}
 
 	return &mailv1.SendTemplateResponse{
@@ -143,11 +144,11 @@ func (s *MailServer) Send(
 	}
 
 	if err := s.Mailer().Send(
-		req.From, req.To, req.Cc, req.Bcc, req.Subject,
+		ctx, req.From, req.To, req.Cc, req.Bcc, req.Subject,
 		req.HtmlBody, req.TextBody,
 	); err != nil {
 		lg.Errorf("failed to send email, error: %v", err)
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, status.Error(codes.Internal, "failed to send email")
 	}
 
 	return &mailv1.SendResponse{
