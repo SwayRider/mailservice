@@ -11,10 +11,9 @@
 //
 // # Authentication
 //
-// The service fetches JWT public keys from the authservice to verify tokens.
-// Two background routines maintain the key cache:
-//   - publicKeyFetcher: Periodically fetches keys from authservice
-//   - publicKeyListener: Updates the local cache when new keys arrive
+// The service fetches JWT public keys from the authservice to verify
+// tokens, keeping them refreshed in the background via a swlib/jwtkeys.Cache
+// (see JWT_KEYS_REFRESH_INTERVAL_SECS / JWT_KEYS_FETCH_TIMEOUT_SECS).
 //
 // # Endpoints
 //
@@ -24,7 +23,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"time"
 
@@ -32,12 +30,11 @@ import (
 	"github.com/swayrider/grpcclients"
 	"github.com/swayrider/grpcclients/authclient"
 	"github.com/swayrider/mailservice/internal/mail"
-	"github.com/swayrider/mailservice/internal/repository"
 	"github.com/swayrider/mailservice/internal/server"
 	healthv1 "github.com/swayrider/protos/health/v1"
 	mailv1 "github.com/swayrider/protos/mail/v1"
 	"github.com/swayrider/swlib/app"
-	"github.com/swayrider/swlib/cache"
+	"github.com/swayrider/swlib/jwtkeys"
 	log "github.com/swayrider/swlib/logger"
 	"google.golang.org/grpc"
 )
@@ -112,8 +109,6 @@ const (
 )
 
 func main() {
-	keyChan := make(chan []string)
-
 	application := app.New("mailservice").
 		WithDefaultConfigFields(app.BackendServiceFields, app.FlagGroupOverrides{}).
 		WithServiceClients(
@@ -146,11 +141,14 @@ func main() {
 					"(defaults to the SMTP user's domain if unset)",
 				DefMailAllowedFromDomains),
 		).
-		WithConfigFields(app.RateLimitConfigFields()...)
+		WithConfigFields(app.RateLimitConfigFields()...).
+		WithConfigFields(app.JWTKeysConfigFields()...)
+
+	jwtKeyCache := jwtkeys.New(application.Logger())
 
 	grpcConfig := app.NewGrpcConfig(
 		app.AuthInterceptor|app.RateLimitInterceptor,
-		getPublicKeys,
+		jwtKeyCache.GetPublicKeys,
 		app.GrpcServiceHooks{
 			ServiceRegistrar:   grpcMailRegistrar,
 			ServiceHTTPHandler: grpcMailGateway(application),
@@ -166,11 +164,10 @@ func main() {
 
 	application = application.
 		WithBackgroundRoutines(
-			publicKeyListener(keyChan),
-			publicKeyFetcher(keyChan),
+			app.JWTKeysFetcher(jwtKeyCache),
 			app.RateLimitEvictor(grpcConfig),
 		).
-		WithInitializers(app.RateLimiterInitializer(grpcConfig)).
+		WithInitializers(app.JWTKeysInitializer(jwtKeyCache), app.RateLimiterInitializer(grpcConfig)).
 		WithGrpc(grpcConfig)
 	application.Run()
 }
@@ -185,53 +182,6 @@ func authServiceClientCtor(a app.App) grpcclients.Client {
 		lg.Fatalf("failed to create authservice client: %v", err)
 	}
 	return clnt
-}
-
-// publicKeyListener is a background routine that listens for JWT public key updates.
-// When new keys are received on the channel, they are stored in the local cache.
-func publicKeyListener(keyChan chan []string) func(app.App) {
-	return func(a app.App) {
-		ctx := a.BackgroundContext()
-		defer func() {
-			a.BackgroundWaitGroup().Done()
-		}()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case keys := <-keyChan:
-				cache.LCSet(repository.JwtPublicKeys, keys)
-			}
-		}
-	}
-}
-
-// publicKeyFetcher is a background routine that periodically fetches JWT public keys
-// from the authservice and sends them to the listener via the channel.
-func publicKeyFetcher(keyChan chan []string) func(app.App) {
-	return func(a app.App) {
-		ctx := a.BackgroundContext()
-		defer func() {
-			a.BackgroundWaitGroup().Done()
-		}()
-		clnt := app.GetServiceClient[*authclient.Client](a, "authservice")
-		authclient.PublicKeyFetcher(ctx, clnt, keyChan)
-	}
-}
-
-// getPublicKeys retrieves JWT public keys from the local cache.
-// This function is called by the gRPC auth interceptor to verify tokens.
-func getPublicKeys() ([]string, error) {
-	keysIface, ok := cache.LCGet(repository.JwtPublicKeys)
-	if !ok {
-		return nil, fmt.Errorf("no public keys found")
-	}
-
-	keys, ok := keysIface.([]string)
-	if !ok {
-		return nil, fmt.Errorf("invalid public keys")
-	}
-	return keys, nil
 }
 
 // grpcMailRegistrar registers the MailService gRPC server with the registrar.
