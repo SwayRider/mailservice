@@ -536,6 +536,39 @@ func TestSendTemplate_AbsolutePathTemplate(t *testing.T) {
 	}
 }
 
+func TestSendTemplate_MissingDataKeyRendersEmpty(t *testing.T) {
+	var gotHTML, gotText string
+	mailer := &mockMailer{
+		sendFn: func(ctx context.Context, from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
+			gotHTML = htmlBody
+			gotText = textBody
+			return nil
+		},
+	}
+	dir := writeTemplates(t, map[string]string{
+		"test.html": `<p>Hello {{index . "Name"}}!</p>`,
+		"test.txt":  `Hello {{index . "Name"}}!`,
+	})
+	s := newTestMailServer(mailer, dir)
+
+	// Data intentionally omits "Name", the key both templates reference.
+	_, err := s.SendTemplate(context.Background(), &mailv1.SendTemplateRequest{
+		To:           []string{"recipient@example.com"},
+		HtmlTemplate: "test.html",
+		TextTemplate: "test.txt",
+		Data:         map[string]string{"Other": "value"},
+	})
+	if err != nil {
+		t.Fatalf("SendTemplate returned unexpected error for a missing data key: %v", err)
+	}
+	if gotHTML != "<p>Hello !</p>" {
+		t.Errorf("HTML body = %q, want %q (missing key should render empty)", gotHTML, "<p>Hello !</p>")
+	}
+	if gotText != "Hello !" {
+		t.Errorf("text body = %q, want %q (missing key should render empty)", gotText, "Hello !")
+	}
+}
+
 func TestSendTemplate_HiddenOrEmptyTemplateName(t *testing.T) {
 	dir := writeTemplates(t, map[string]string{
 		"test.txt": `Hello`,

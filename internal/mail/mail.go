@@ -11,6 +11,7 @@ package mail
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net"
 	netmail "net/mail"
@@ -36,6 +37,16 @@ type Mailer struct {
 	Port           int           // SMTP server port (typically 587 for TLS)
 	DialTimeout    time.Duration // Timeout for establishing the TCP connection
 	OverallTimeout time.Duration // Timeout for the entire SMTP transaction once connected
+
+	// rootCAs overrides the trusted CA pool used to verify the SMTP
+	// server's certificate during STARTTLS. Nil (the default, and the only
+	// value NewMailer ever sets) means "use the host's default root CA
+	// set" -- the exact same behavior as before this field existed. It
+	// exists solely so tests in this package can verify a full STARTTLS
+	// handshake against a fake server presenting a test certificate,
+	// without weakening verification (e.g. via InsecureSkipVerify) for
+	// real deployments.
+	rootCAs *x509.CertPool
 }
 
 // NewMailer creates a new Mailer with the given SMTP configuration.
@@ -84,6 +95,21 @@ func (m *Mailer) Send(
 	htmlBody string,
 	textBody string,
 ) error {
+	return m.sendWithMandatorySTARTTLS(ctx, m.buildEmail(from, to, cc, bcc, subject, htmlBody, textBody))
+}
+
+// buildEmail constructs the outgoing message from its parts. It is a pure
+// function (no I/O), split out from Send so tests can verify the resulting
+// message is well-formed without needing a live SMTP connection.
+func (m *Mailer) buildEmail(
+	from string,
+	to []string,
+	cc []string,
+	bcc []string,
+	subject string,
+	htmlBody string,
+	textBody string,
+) *email.Email {
 	e := email.NewEmail()
 	if from != "" {
 		e.From = from
@@ -96,8 +122,7 @@ func (m *Mailer) Send(
 	e.Subject = subject
 	e.HTML = []byte(htmlBody)
 	e.Text = []byte(textBody)
-
-	return m.sendWithMandatorySTARTTLS(ctx, e)
+	return e
 }
 
 // sendWithMandatorySTARTTLS delivers e over a connection that has been
@@ -154,7 +179,7 @@ func (m *Mailer) sendWithMandatorySTARTTLS(ctx context.Context, e *email.Email) 
 			"smtp server %s does not advertise STARTTLS; refusing to send credentials over a plaintext channel",
 			m.Host)
 	}
-	if err := c.StartTLS(&tls.Config{ServerName: m.Host}); err != nil {
+	if err := c.StartTLS(&tls.Config{ServerName: m.Host, RootCAs: m.rootCAs}); err != nil {
 		return fmt.Errorf("smtp starttls: %w", err)
 	}
 

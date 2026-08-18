@@ -5,8 +5,5 @@ local.env
 REST/
 rest/
 
-# Code review reports
-CODE_REVIEW*.md
-
 .DS_Store
 
