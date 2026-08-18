@@ -13,12 +13,9 @@ package server
 import (
 	"bytes"
 	"context"
-	htmlTemp "html/template"
-	"os"
-	"path/filepath"
+	"errors"
 	"regexp"
 	"strings"
-	txtTemp "text/template"
 
 	mailv1 "github.com/swayrider/protos/mail/v1"
 	log "github.com/swayrider/swlib/logger"
@@ -75,29 +72,21 @@ func (s *MailServer) SendTemplate(
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	htmlBytes, err := os.ReadFile(filepath.Join(s.TemplatesDir(), req.HtmlTemplate))
+	htmlTmpl, err := s.htmlTemplates.get(req.HtmlTemplate)
 	if err != nil {
-		lg.Errorf("failed to get HTML template %s, error: %v", req.HtmlTemplate, err)
-		return nil, status.Error(codes.NotFound, "template not found")
-	}
-	htmlTemplateContent := string(htmlBytes)
-
-	txtBytes, err := os.ReadFile(filepath.Join(s.TemplatesDir(), req.TextTemplate))
-	if err != nil {
-		lg.Errorf("failed to get Text template %s, error: %v", req.TextTemplate, err)
-		return nil, status.Error(codes.NotFound, "template not found")
-	}
-	txtTemplateContent := string(txtBytes)
-
-	htmlTmpl, err := htmlTemp.New("").Parse(htmlTemplateContent)
-	if err != nil {
-		lg.Errorf("failed to parse HTML template %s, error: %v", req.HtmlTemplate, err)
+		lg.Errorf("failed to load HTML template %s, error: %v", req.HtmlTemplate, err)
+		if _, ok := errors.AsType[*templateAccessError](err); ok {
+			return nil, status.Error(codes.NotFound, "template not found")
+		}
 		return nil, status.Error(codes.Internal, "failed to parse template")
 	}
 
-	txtTmpl, err := txtTemp.New("").Parse(txtTemplateContent)
+	txtTmpl, err := s.txtTemplates.get(req.TextTemplate)
 	if err != nil {
-		lg.Errorf("failed to parse Text template %s, error: %v", req.TextTemplate, err)
+		lg.Errorf("failed to load text template %s, error: %v", req.TextTemplate, err)
+		if _, ok := errors.AsType[*templateAccessError](err); ok {
+			return nil, status.Error(codes.NotFound, "template not found")
+		}
 		return nil, status.Error(codes.Internal, "failed to parse template")
 	}
 

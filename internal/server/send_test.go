@@ -3,8 +3,11 @@ package server
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	mailv1 "github.com/swayrider/protos/mail/v1"
 	"google.golang.org/grpc/codes"
@@ -176,6 +179,96 @@ func TestSendTemplate_Success(t *testing.T) {
 	}
 	if gotText != "Hello Alice" {
 		t.Errorf("text body = %q, want %q", gotText, "Hello Alice")
+	}
+}
+
+func TestSendTemplate_PicksUpChangedTemplateContent(t *testing.T) {
+	var gotHTML string
+	mailer := &mockMailer{
+		sendFn: func(ctx context.Context, from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
+			gotHTML = htmlBody
+			return nil
+		},
+	}
+	dir := writeTemplates(t, map[string]string{
+		"test.html": `<p>Version 1</p>`,
+		"test.txt":  `Hello`,
+	})
+	s := newTestMailServer(mailer, dir)
+
+	req := &mailv1.SendTemplateRequest{
+		To:           []string{"recipient@example.com"},
+		HtmlTemplate: "test.html",
+		TextTemplate: "test.txt",
+	}
+
+	if _, err := s.SendTemplate(context.Background(), req); err != nil {
+		t.Fatalf("first SendTemplate returned unexpected error: %v", err)
+	}
+	if gotHTML != "<p>Version 1</p>" {
+		t.Fatalf("first HTML body = %q, want %q", gotHTML, "<p>Version 1</p>")
+	}
+
+	// Overwrite the template file (which advances its mtime) and force the
+	// mtime forward explicitly, so the assertion below doesn't depend on
+	// wall-clock resolution between the two writes.
+	path := filepath.Join(dir, "test.html")
+	if err := os.WriteFile(path, []byte(`<p>Version 2</p>`), 0o644); err != nil {
+		t.Fatalf("failed to overwrite template: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	later := info.ModTime().Add(time.Second)
+	if err := os.Chtimes(path, later, later); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	if _, err := s.SendTemplate(context.Background(), req); err != nil {
+		t.Fatalf("second SendTemplate returned unexpected error: %v", err)
+	}
+	if gotHTML != "<p>Version 2</p>" {
+		t.Errorf("second HTML body = %q, want %q (edited template should take effect live)", gotHTML, "<p>Version 2</p>")
+	}
+}
+
+func TestSendTemplate_ReusesCacheWhenFileUnchanged(t *testing.T) {
+	mailer := &mockMailer{}
+	dir := writeTemplates(t, map[string]string{
+		"test.html": `<p>Hello</p>`,
+		"test.txt":  `Hello`,
+	})
+	s := newTestMailServer(mailer, dir)
+
+	req := &mailv1.SendTemplateRequest{
+		To:           []string{"recipient@example.com"},
+		HtmlTemplate: "test.html",
+		TextTemplate: "test.txt",
+	}
+
+	if _, err := s.SendTemplate(context.Background(), req); err != nil {
+		t.Fatalf("first SendTemplate returned unexpected error: %v", err)
+	}
+
+	// Overwrite the file with content that would fail to parse if it were
+	// ever re-read, but reset its mtime back to the original value so the
+	// cache should still consider it unchanged.
+	path := filepath.Join(dir, "test.html")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	origModTime := info.ModTime()
+	if err := os.WriteFile(path, []byte(`{{range}}{{end}}`), 0o644); err != nil {
+		t.Fatalf("failed to overwrite template: %v", err)
+	}
+	if err := os.Chtimes(path, origModTime, origModTime); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	if _, err := s.SendTemplate(context.Background(), req); err != nil {
+		t.Errorf("second SendTemplate returned error %v, want nil (cache should have been reused instead of re-parsing the broken content)", err)
 	}
 }
 

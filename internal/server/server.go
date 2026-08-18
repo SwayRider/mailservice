@@ -15,9 +15,11 @@ package server
 
 import (
 	"context"
+	htmlTemp "html/template"
 	"net"
 	"strconv"
 	"sync"
+	txtTemp "text/template"
 	"time"
 
 	log "github.com/swayrider/swlib/logger"
@@ -56,6 +58,9 @@ type MailServer struct {
 	mailer             MailSender  // SMTP mailer for email delivery
 	allowedFromDomains []string    // Domains permitted in the request From address
 	l                  *log.Logger // Logger instance
+
+	htmlTemplates *templateCache[*htmlTemp.Template] // Cache of parsed HTML templates, keyed by name+mtime
+	txtTemplates  *templateCache[*txtTemp.Template]  // Cache of parsed text templates, keyed by name+mtime
 }
 
 // HealthServer implements the HealthService gRPC interface for health checks.
@@ -89,6 +94,12 @@ func NewMailServer(
 		templatesDir:       templatesDir,
 		mailer:             mailer,
 		allowedFromDomains: allowedFromDomains,
+		htmlTemplates: newTemplateCache(templatesDir, func(b []byte) (*htmlTemp.Template, error) {
+			return htmlTemp.New("").Parse(string(b))
+		}),
+		txtTemplates: newTemplateCache(templatesDir, func(b []byte) (*txtTemp.Template, error) {
+			return txtTemp.New("").Parse(string(b))
+		}),
 		l: l.Derive(
 			log.WithComponent("MailServer"),
 			log.WithFunction("NewMailServer"),
