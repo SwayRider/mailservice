@@ -50,7 +50,7 @@ Configuration is provided via environment variables or CLI flags.
 
 | Environment Variable | CLI Flag | Default | Description |
 | -------------------- | -------- | ------- | ----------- |
-| `MAIL_TEMPLATES_DIR` | `-mail-templates-dir` | `assets/mail/templates` | Directory containing email templates (bundled in container) |
+| `MAIL_TEMPLATES_DIR` | `-mail-templates-dir` | `assets/templates` | Directory containing email templates (bundled in container) |
 
 ### Service Dependencies
 
@@ -61,14 +61,14 @@ Configuration is provided via environment variables or CLI flags.
 
 ## API Reference
 
-The API is defined in the Protocol Buffer files at `backend/protos/mail/v1/` and `backend/protos/health/v1/`.
+The API is defined in the Protocol Buffer files at `protos/mail/v1/` and `protos/health/v1/`.
 
 ### Endpoint Access Levels
 
 | Level | Description |
 | ----- | ----------- |
 | **Public** | No authentication required (health endpoints only) |
-| **Admin** | Requires valid JWT with admin privileges |
+| **Admin** | Requires valid JWT with admin privileges (a valid JWT for a non-admin user is rejected) |
 | **Service Client** | Requires service client token with `email:send` scope |
 
 Both send endpoints (`Send`, `SendTemplate`) require admin or service client authentication.
@@ -178,7 +178,7 @@ Response:
 
 ## Email Templates
 
-Email templates are bundled in the container under `assets/mail/templates` and use Go's standard `html/template` and `text/template` packages. The directory can be overridden via `MAIL_TEMPLATES_DIR`.
+Email templates are bundled in the container under `assets/templates` and use Go's standard `html/template` and `text/template` packages. The directory can be overridden via `MAIL_TEMPLATES_DIR`.
 
 ### Template Storage
 
@@ -240,15 +240,14 @@ The authservice uses the following templates (bundled in the container):
 ## Building
 
 ```bash
-# Generate protobuf code (run from repo root)
-make proto
+# Generate protobuf code
+cd protos && make
 
 # Build the service
-cd backend
-go build ./services/mailservice/cmd/mailservice
+go build ./cmd/mailservice
 
 # Run the service
-go run ./services/mailservice/cmd/mailservice
+go run ./cmd/mailservice
 ```
 
 ## Docker
