@@ -65,6 +65,15 @@ func (s *MailServer) SendTemplate(
 		return nil, status.Error(codes.InvalidArgument, "invalid template name")
 	}
 
+	if err := validateFrom(req.From, s.allowedFromDomains); err != nil {
+		lg.Errorf("rejected from address: %v", err)
+		return nil, status.Error(codes.PermissionDenied, err.Error())
+	}
+	if err := validateRecipients(req.To, req.Cc, req.Bcc); err != nil {
+		lg.Errorf("rejected recipients: %v", err)
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+
 	htmlBytes, err := os.ReadFile(filepath.Join(s.TemplatesDir(), req.HtmlTemplate))
 	if err != nil {
 		lg.Errorf("failed to get HTML template %s, error: %v", req.HtmlTemplate, err)
@@ -123,6 +132,15 @@ func (s *MailServer) Send(
 	req *mailv1.SendRequest,
 ) (*mailv1.SendResponse, error) {
 	lg := s.Logger().Derive(log.WithFunction("Send"))
+
+	if err := validateFrom(req.From, s.allowedFromDomains); err != nil {
+		lg.Errorf("rejected from address: %v", err)
+		return nil, status.Error(codes.PermissionDenied, err.Error())
+	}
+	if err := validateRecipients(req.To, req.Cc, req.Bcc); err != nil {
+		lg.Errorf("rejected recipients: %v", err)
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
 
 	if err := s.Mailer().Send(
 		req.From, req.To, req.Cc, req.Bcc, req.Subject,

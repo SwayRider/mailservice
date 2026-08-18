@@ -15,7 +15,7 @@ func TestMain(m *testing.M) {
 }
 
 func newTestMailServer(mailer MailSender, templatesDir string) *MailServer {
-	return NewMailServer(templatesDir, mailer, log.New())
+	return NewMailServer(templatesDir, mailer, []string{"example.com"}, log.New())
 }
 
 func newTestHealthServer() *HealthServer {

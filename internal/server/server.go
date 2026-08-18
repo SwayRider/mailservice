@@ -46,9 +46,10 @@ func init() {
 // It combines a filesystem templates directory and an SMTP mailer for delivery.
 type MailServer struct {
 	mailv1.UnimplementedMailServiceServer
-	templatesDir string     // Directory path for email templates
-	mailer       MailSender // SMTP mailer for email delivery
-	l            *log.Logger // Logger instance
+	templatesDir       string     // Directory path for email templates
+	mailer             MailSender // SMTP mailer for email delivery
+	allowedFromDomains []string   // Domains permitted in the request From address
+	l                  *log.Logger // Logger instance
 }
 
 // HealthServer implements the HealthService gRPC interface for health checks.
@@ -58,14 +59,20 @@ type HealthServer struct {
 }
 
 // NewMailServer creates a new MailServer with the given dependencies.
+//
+// allowedFromDomains restricts the domain of the request-supplied From
+// address; a request From outside this list is rejected. It has no effect
+// on an empty From, which falls back to the mailer's configured user.
 func NewMailServer(
 	templatesDir string,
 	mailer MailSender,
+	allowedFromDomains []string,
 	l *log.Logger,
 ) *MailServer {
 	return &MailServer{
-		templatesDir: templatesDir,
-		mailer:       mailer,
+		templatesDir:       templatesDir,
+		mailer:             mailer,
+		allowedFromDomains: allowedFromDomains,
 		l: l.Derive(
 			log.WithComponent("MailServer"),
 			log.WithFunction("NewMailServer"),

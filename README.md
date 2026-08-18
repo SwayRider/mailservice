@@ -44,6 +44,7 @@ Configuration is provided via environment variables or CLI flags.
 | `SMTP_PORT` | `-smtp-port` | 587 | SMTP server port |
 | `SMTP_USER` | `-smtp-user` | | SMTP authentication username |
 | `SMTP_PASSWORD` | `-smtp-password` | | SMTP authentication password |
+| `MAIL_ALLOWED_FROM_DOMAINS` | `-mail-allowed-from-domains` | (derived from `SMTP_USER`) | Comma-separated list of domains allowed in the request `From` address. If unset, defaults to `SMTP_USER`'s domain |
 
 ### Template Configuration
 
@@ -107,6 +108,11 @@ Simple health check that returns HTTP 200.
 ---
 
 ### Email Sending Endpoints
+
+Both endpoints validate the request before sending: `from`, if set, must be a syntactically valid
+address whose domain is in `MAIL_ALLOWED_FROM_DOMAINS` (an empty `from` falls back to `SMTP_USER`
+and is not checked); `to`/`cc`/`bcc` addresses must be syntactically valid and `to` must be
+non-empty.
 
 #### Send (Protected)
 

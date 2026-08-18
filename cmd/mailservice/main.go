@@ -25,6 +25,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"google.golang.org/grpc"
@@ -68,6 +69,8 @@ Environment variables:
 	SMTP_PORT
 	SMTP_USER
 	SMTP_PASSWORD
+
+	MAIL_ALLOWED_FROM_DOMAINS
 */
 
 const (
@@ -89,6 +92,10 @@ const (
 	DefSmtpPort     = 587
 	DefSmtpUser     = ""
 	DefSmtpPassword = ""
+
+	FldMailAllowedFromDomains = "mail-allowed-from-domains"
+	EnvMailAllowedFromDomains = "MAIL_ALLOWED_FROM_DOMAINS"
+	DefMailAllowedFromDomains = ""
 )
 
 func main() {
@@ -110,6 +117,11 @@ func main() {
 				FldSmtpUser, EnvSmtpUser, "SMTP user", DefSmtpUser),
 			app.NewStringConfigField(
 				FldSmtpPassword, EnvSmtpPassword, "SMTP password", DefSmtpPassword),
+			app.NewStringConfigField(
+				FldMailAllowedFromDomains, EnvMailAllowedFromDomains,
+				"Comma-separated list of domains allowed in the request From address "+
+					"(defaults to the SMTP user's domain if unset)",
+				DefMailAllowedFromDomains),
 		).
 		WithBackgroundRoutines(
 			publicKeyListener(keyChan),
@@ -198,11 +210,38 @@ func grpcMailRegistrar(r grpc.ServiceRegistrar, a app.App) {
 	password := app.GetConfigField[string](a.Config(), FldSmtpPassword)
 	host := app.GetConfigField[string](a.Config(), FldSmtpHost)
 	port := app.GetConfigField[int](a.Config(), FldSmtpPort)
+	allowedFromDomains := app.GetConfigField[string](a.Config(), FldMailAllowedFromDomains)
 
 	srv := server.NewMailServer(
 		templatesDir,
-		mail.NewMailer(user, password, host, port), a.Logger())
+		mail.NewMailer(user, password, host, port),
+		resolveAllowedFromDomains(allowedFromDomains, user, a.Logger()),
+		a.Logger())
 	mailv1.RegisterMailServiceServer(r, srv)
+}
+
+// resolveAllowedFromDomains parses the configured comma-separated domain
+// list. If it is unset, the allowlist is derived from the SMTP user's
+// domain, so the service is secure-by-default without extra configuration.
+// If the SMTP user has no domain (e.g. a bare local-dev username), every
+// domain is allowed and a warning is logged.
+func resolveAllowedFromDomains(configured string, smtpUser string, l *log.Logger) []string {
+	if configured != "" {
+		domains := strings.Split(configured, ",")
+		for i, d := range domains {
+			domains[i] = strings.TrimSpace(d)
+		}
+		return domains
+	}
+
+	if i := strings.LastIndex(smtpUser, "@"); i >= 0 {
+		return []string{smtpUser[i+1:]}
+	}
+
+	l.Derive(log.WithFunction("resolveAllowedFromDomains")).Warnf(
+		"MAIL_ALLOWED_FROM_DOMAINS is unset and SMTP_USER %q has no domain to derive a default from; "+
+			"allowing any From domain", smtpUser)
+	return nil
 }
 
 // grpcHealthRegistrar registers the HealthService gRPC server with the registrar.

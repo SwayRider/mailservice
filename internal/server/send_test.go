@@ -33,6 +33,86 @@ func TestSend_Success(t *testing.T) {
 	}
 }
 
+func TestSend_RejectsDisallowedFromDomain(t *testing.T) {
+	var called bool
+	mailer := &mockMailer{
+		sendFn: func(from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
+			called = true
+			return nil
+		},
+	}
+	s := newTestMailServer(mailer, t.TempDir())
+
+	_, err := s.Send(context.Background(), &mailv1.SendRequest{
+		From: "spoof@evil.com",
+		To:   []string{"recipient@example.com"},
+	})
+	if err == nil {
+		t.Fatal("expected error for disallowed from domain, got nil")
+	}
+	if code := status.Code(err); code != codes.PermissionDenied {
+		t.Errorf("error code = %v, want %v", code, codes.PermissionDenied)
+	}
+	if called {
+		t.Error("mailer.Send should not be called for a disallowed from domain")
+	}
+}
+
+func TestSend_AllowsEmptyFrom(t *testing.T) {
+	mailer := &mockMailer{}
+	s := newTestMailServer(mailer, t.TempDir())
+
+	_, err := s.Send(context.Background(), &mailv1.SendRequest{
+		To: []string{"recipient@example.com"},
+	})
+	if err != nil {
+		t.Fatalf("Send returned unexpected error: %v", err)
+	}
+}
+
+func TestSend_RejectsInvalidFromAddress(t *testing.T) {
+	s := newTestMailServer(&mockMailer{}, t.TempDir())
+
+	_, err := s.Send(context.Background(), &mailv1.SendRequest{
+		From: "not-an-email",
+		To:   []string{"recipient@example.com"},
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid from address, got nil")
+	}
+	if code := status.Code(err); code != codes.PermissionDenied {
+		t.Errorf("error code = %v, want %v", code, codes.PermissionDenied)
+	}
+}
+
+func TestSend_RejectsEmptyRecipients(t *testing.T) {
+	s := newTestMailServer(&mockMailer{}, t.TempDir())
+
+	_, err := s.Send(context.Background(), &mailv1.SendRequest{
+		From: "sender@example.com",
+	})
+	if err == nil {
+		t.Fatal("expected error for empty recipients, got nil")
+	}
+	if code := status.Code(err); code != codes.InvalidArgument {
+		t.Errorf("error code = %v, want %v", code, codes.InvalidArgument)
+	}
+}
+
+func TestSend_RejectsInvalidRecipientAddress(t *testing.T) {
+	s := newTestMailServer(&mockMailer{}, t.TempDir())
+
+	_, err := s.Send(context.Background(), &mailv1.SendRequest{
+		To: []string{"not-an-email"},
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid recipient address, got nil")
+	}
+	if code := status.Code(err); code != codes.InvalidArgument {
+		t.Errorf("error code = %v, want %v", code, codes.InvalidArgument)
+	}
+}
+
 func TestSend_MailerError(t *testing.T) {
 	smtpErr := errors.New("smtp: connection refused")
 	mailer := &mockMailer{
@@ -95,6 +175,76 @@ func TestSendTemplate_Success(t *testing.T) {
 	}
 }
 
+func TestSendTemplate_RejectsDisallowedFromDomain(t *testing.T) {
+	var called bool
+	mailer := &mockMailer{
+		sendFn: func(from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
+			called = true
+			return nil
+		},
+	}
+	dir := writeTemplates(t, map[string]string{
+		"test.html": `<p>Hello</p>`,
+		"test.txt":  `Hello`,
+	})
+	s := newTestMailServer(mailer, dir)
+
+	_, err := s.SendTemplate(context.Background(), &mailv1.SendTemplateRequest{
+		From:         "spoof@evil.com",
+		To:           []string{"recipient@example.com"},
+		HtmlTemplate: "test.html",
+		TextTemplate: "test.txt",
+	})
+	if err == nil {
+		t.Fatal("expected error for disallowed from domain, got nil")
+	}
+	if code := status.Code(err); code != codes.PermissionDenied {
+		t.Errorf("error code = %v, want %v", code, codes.PermissionDenied)
+	}
+	if called {
+		t.Error("mailer.Send should not be called for a disallowed from domain")
+	}
+}
+
+func TestSendTemplate_RejectsEmptyRecipients(t *testing.T) {
+	dir := writeTemplates(t, map[string]string{
+		"test.html": `<p>Hello</p>`,
+		"test.txt":  `Hello`,
+	})
+	s := newTestMailServer(&mockMailer{}, dir)
+
+	_, err := s.SendTemplate(context.Background(), &mailv1.SendTemplateRequest{
+		HtmlTemplate: "test.html",
+		TextTemplate: "test.txt",
+	})
+	if err == nil {
+		t.Fatal("expected error for empty recipients, got nil")
+	}
+	if code := status.Code(err); code != codes.InvalidArgument {
+		t.Errorf("error code = %v, want %v", code, codes.InvalidArgument)
+	}
+}
+
+func TestSendTemplate_RejectsInvalidRecipientAddress(t *testing.T) {
+	dir := writeTemplates(t, map[string]string{
+		"test.html": `<p>Hello</p>`,
+		"test.txt":  `Hello`,
+	})
+	s := newTestMailServer(&mockMailer{}, dir)
+
+	_, err := s.SendTemplate(context.Background(), &mailv1.SendTemplateRequest{
+		To:           []string{"not-an-email"},
+		HtmlTemplate: "test.html",
+		TextTemplate: "test.txt",
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid recipient address, got nil")
+	}
+	if code := status.Code(err); code != codes.InvalidArgument {
+		t.Errorf("error code = %v, want %v", code, codes.InvalidArgument)
+	}
+}
+
 func TestSendTemplate_MissingHTMLTemplate(t *testing.T) {
 	dir := writeTemplates(t, map[string]string{
 		"test.txt": `Hello`,
@@ -140,6 +290,7 @@ func TestSendTemplate_InvalidHTMLTemplateSyntax(t *testing.T) {
 	s := newTestMailServer(&mockMailer{}, dir)
 
 	_, err := s.SendTemplate(context.Background(), &mailv1.SendTemplateRequest{
+		To:           []string{"recipient@example.com"},
 		HtmlTemplate: "bad.html",
 		TextTemplate: "ok.txt",
 	})
@@ -159,6 +310,7 @@ func TestSendTemplate_InvalidTextTemplateSyntax(t *testing.T) {
 	s := newTestMailServer(&mockMailer{}, dir)
 
 	_, err := s.SendTemplate(context.Background(), &mailv1.SendTemplateRequest{
+		To:           []string{"recipient@example.com"},
 		HtmlTemplate: "ok.html",
 		TextTemplate: "bad.txt",
 	})
