@@ -123,13 +123,10 @@ func main() {
 					"(defaults to the SMTP user's domain if unset)",
 				DefMailAllowedFromDomains),
 		).
-		WithBackgroundRoutines(
-			publicKeyListener(keyChan),
-			publicKeyFetcher(keyChan),
-		)
+		WithConfigFields(app.RateLimitConfigFields()...)
 
 	grpcConfig := app.NewGrpcConfig(
-		app.AuthInterceptor,
+		app.AuthInterceptor|app.RateLimitInterceptor,
 		getPublicKeys,
 		app.GrpcServiceHooks{
 			ServiceRegistrar:   grpcMailRegistrar,
@@ -140,7 +137,18 @@ func main() {
 			ServiceHTTPHandler: grpcHealthGateway(application),
 		},
 	)
-	application = application.WithGrpc(grpcConfig)
+	// mailservice has no attachment support (text/html body + template data
+	// only), so a cap well below gRPC's ~4MB implicit default is safe.
+	grpcConfig.SetMaxRecvMsgSize(2 << 20)
+
+	application = application.
+		WithBackgroundRoutines(
+			publicKeyListener(keyChan),
+			publicKeyFetcher(keyChan),
+			app.RateLimitEvictor(grpcConfig),
+		).
+		WithInitializers(app.RateLimiterInitializer(grpcConfig)).
+		WithGrpc(grpcConfig)
 	application.Run()
 }
 
