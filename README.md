@@ -20,10 +20,7 @@ The mailservice exposes two server interfaces:
 
 ### Background Processes
 
-The service runs two background routines:
-
-1. **Public Key Fetcher**: Periodically fetches JWT public keys from authservice
-2. **Public Key Listener**: Caches received public keys for JWT verification
+The service runs a `swlib/jwtkeys.Cache`-backed background routine that periodically fetches JWT public keys from authservice and refreshes the in-memory cache used for token verification (see `JWT_KEYS_REFRESH_INTERVAL_SECS` / `JWT_KEYS_FETCH_TIMEOUT_SECS` below).
 
 ## Configuration
 
@@ -45,6 +42,29 @@ Configuration is provided via environment variables or CLI flags.
 | `SMTP_USER` | `-smtp-user` | | SMTP authentication username |
 | `SMTP_PASSWORD` | `-smtp-password` | | SMTP authentication password |
 | `MAIL_ALLOWED_FROM_DOMAINS` | `-mail-allowed-from-domains` | (derived from `SMTP_USER`) | Comma-separated list of domains allowed in the request `From` address. If unset, defaults to `SMTP_USER`'s domain |
+| `SMTP_DIAL_TIMEOUT_SECS` | `-smtp-dial-timeout-secs` | `5` | Timeout for establishing the SMTP connection |
+| `SMTP_TIMEOUT_SECS` | `-smtp-timeout-secs` | `30` | Timeout for the entire SMTP transaction |
+
+### Health
+
+| Environment Variable | CLI Flag | Default | Description |
+| -------------------- | -------- | ------- | ----------- |
+| `HEALTH_PROBE_TTL_SECS` | `-health-probe-ttl-secs` | `15` | How long a health probe result is cached before re-probing SMTP |
+
+### Rate Limiting
+
+| Environment Variable | CLI Flag | Default | Description |
+| -------------------- | -------- | ------- | ----------- |
+| `RATE_LIMIT_RPS` | `-rate-limit-rps` | `50` | Requests per second allowed per source IP |
+| `RATE_LIMIT_BURST` | `-rate-limit-burst` | `100` | Burst allowance per source IP |
+| `RATE_LIMIT_IDLE_TTL_SECS` | `-rate-limit-idle-ttl-secs` | `300` | How long an idle per-IP rate limiter entry is kept |
+
+### JWT Key Cache
+
+| Environment Variable | CLI Flag | Default | Description |
+| -------------------- | -------- | ------- | ----------- |
+| `JWT_KEYS_REFRESH_INTERVAL_SECS` | `-jwt-keys-refresh-interval-secs` | `300` | How often the JWT public-key cache is refreshed from authservice |
+| `JWT_KEYS_FETCH_TIMEOUT_SECS` | `-jwt-keys-fetch-timeout-secs` | `15` | Timeout for a single public-key fetch |
 
 ### Template Configuration
 
@@ -188,6 +208,8 @@ assets/templates/
 ├── verify_user.txt
 ├── reset_password.html
 ├── reset_password.txt
+├── invite_user.html
+├── invite_user.txt
 ├── test.html
 └── test.txt
 ```
@@ -230,12 +252,13 @@ The authservice uses the following templates (bundled in the container):
 | -------- | ------- |
 | `verify_user.html` / `verify_user.txt` | Email verification |
 | `reset_password.html` / `reset_password.txt` | Password reset |
+| `invite_user.html` / `invite_user.txt` | Invite-only registration email |
 
 ## Security Considerations
 
 - **Service-to-Service Calls**: Callers such as authservice must obtain an `email:send`-scoped service-client token and pass it as `Authorization: Bearer <token>` — there is no unauthenticated path to any send endpoint.
 - **SMTP Credentials**: Store SMTP credentials securely using environment variables or a secrets manager.
-- **Rate Limiting**: Consider implementing rate limiting at the infrastructure level to prevent email abuse.
+- **Rate Limiting**: Per-source-IP rate limiting is built in (`RATE_LIMIT_RPS` / `RATE_LIMIT_BURST` / `RATE_LIMIT_IDLE_TTL_SECS`, see Configuration above).
 
 ## Building
 
@@ -256,6 +279,19 @@ go run ./cmd/mailservice
 # Build container (from mailservice/ directory)
 make container-build
 ```
+
+### Tagging
+
+Tags are derived from the git state of the checkout:
+
+| Branch / state | Tags applied |
+|----------------|--------------|
+| Version-tagged commit (`v1.2.3`) | `v1.2.3`, `latest` |
+| `main` (untagged) | `v{last}-{date}-dev-b{N}`, `dev-latest` |
+| Other branch | `v{last}-{branch}-b{N}` |
+| Detached HEAD | `v{last}-{sha}-b{N}` |
+
+Non-release builds get an incrementing build number (`-b{N}`) so repeated builds of the same branch don't overwrite each other. The number comes from querying the registry for the highest existing `-b{N}` tag on the same base tag and adding 1; the build fails if the registry can't be reached. Release builds are immutable and never get a build number.
 
 ### FORCE_DEV_LATEST
 
