@@ -138,13 +138,13 @@ func TestSend_RespectsOverallTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to listen: %v", err)
 	}
-	t.Cleanup(func() { l.Close() })
+	t.Cleanup(func() { _ = l.Close() })
 	go func() {
 		conn, err := l.Accept()
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		<-make(chan struct{}) // block forever, holding the connection open
 	}()
 
@@ -308,7 +308,7 @@ func startFakeTLSSMTPServer(t *testing.T) (host string, port int, pool *x509.Cer
 	if err != nil {
 		t.Fatalf("failed to listen: %v", err)
 	}
-	t.Cleanup(func() { l.Close() })
+	t.Cleanup(func() { _ = l.Close() })
 
 	ch := make(chan smtpTransaction, 1)
 	go func() {
@@ -316,9 +316,9 @@ func startFakeTLSSMTPServer(t *testing.T) (host string, port int, pool *x509.Cer
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 
-		var cur net.Conn = conn
+		cur := conn
 		tp := textproto.NewConn(conn)
 		if err := tp.PrintfLine("220 fake.smtp ESMTP"); err != nil {
 			return
@@ -333,11 +333,11 @@ func startFakeTLSSMTPServer(t *testing.T) (host string, port int, pool *x509.Cer
 			upper := strings.ToUpper(line)
 			switch {
 			case strings.HasPrefix(upper, "EHLO"):
-				tp.PrintfLine("250-fake.smtp greets you")
+				_ = tp.PrintfLine("250-fake.smtp greets you")
 				if _, isTLS := cur.(*tls.Conn); !isTLS {
-					tp.PrintfLine("250-STARTTLS")
+					_ = tp.PrintfLine("250-STARTTLS")
 				}
-				tp.PrintfLine("250 AUTH PLAIN")
+				_ = tp.PrintfLine("250 AUTH PLAIN")
 			case strings.HasPrefix(upper, "STARTTLS"):
 				if err := tp.PrintfLine("220 2.0.0 Ready to start TLS"); err != nil {
 					return
@@ -350,13 +350,13 @@ func startFakeTLSSMTPServer(t *testing.T) (host string, port int, pool *x509.Cer
 				tp = textproto.NewConn(tlsConn)
 			case strings.HasPrefix(upper, "AUTH"):
 				tx.authLine = line
-				tp.PrintfLine("235 Authentication successful")
+				_ = tp.PrintfLine("235 Authentication successful")
 			case strings.HasPrefix(upper, "MAIL FROM"):
 				tx.mailFrom = line
-				tp.PrintfLine("250 OK")
+				_ = tp.PrintfLine("250 OK")
 			case strings.HasPrefix(upper, "RCPT TO"):
 				tx.rcptTo = append(tx.rcptTo, line)
-				tp.PrintfLine("250 OK")
+				_ = tp.PrintfLine("250 OK")
 			case strings.HasPrefix(upper, "DATA"):
 				if err := tp.PrintfLine("354 Start mail input; end with <CRLF>.<CRLF>"); err != nil {
 					return
@@ -366,16 +366,16 @@ func startFakeTLSSMTPServer(t *testing.T) (host string, port int, pool *x509.Cer
 					return
 				}
 				tx.data = data
-				tp.PrintfLine("250 OK: queued")
+				_ = tp.PrintfLine("250 OK: queued")
 			case strings.HasPrefix(upper, "QUIT"):
-				tp.PrintfLine("221 Bye")
+				_ = tp.PrintfLine("221 Bye")
 				select {
 				case ch <- tx:
 				default:
 				}
 				return
 			default:
-				tp.PrintfLine("500 unrecognized command")
+				_ = tp.PrintfLine("500 unrecognized command")
 			}
 		}
 	}()
@@ -433,7 +433,7 @@ func startFakeSMTPServer(t *testing.T, advertiseStartTLS bool) (host string, por
 	if err != nil {
 		t.Fatalf("failed to listen: %v", err)
 	}
-	t.Cleanup(func() { l.Close() })
+	t.Cleanup(func() { _ = l.Close() })
 
 	seen := make(chan string, 1)
 	go func() {
@@ -441,7 +441,7 @@ func startFakeSMTPServer(t *testing.T, advertiseStartTLS bool) (host string, por
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 
 		tp := textproto.NewConn(conn)
 		if err := tp.PrintfLine("220 fake.smtp ESMTP"); err != nil {
@@ -454,22 +454,22 @@ func startFakeSMTPServer(t *testing.T, advertiseStartTLS bool) (host string, por
 			}
 			switch {
 			case strings.HasPrefix(strings.ToUpper(line), "EHLO"):
-				tp.PrintfLine("250-fake.smtp greets you")
+				_ = tp.PrintfLine("250-fake.smtp greets you")
 				if advertiseStartTLS {
-					tp.PrintfLine("250-STARTTLS")
+					_ = tp.PrintfLine("250-STARTTLS")
 				}
-				tp.PrintfLine("250 AUTH PLAIN")
+				_ = tp.PrintfLine("250 AUTH PLAIN")
 			case strings.HasPrefix(strings.ToUpper(line), "AUTH"):
 				select {
 				case seen <- line:
 				default:
 				}
-				tp.PrintfLine("235 Authentication successful")
+				_ = tp.PrintfLine("235 Authentication successful")
 			case strings.HasPrefix(strings.ToUpper(line), "QUIT"):
-				tp.PrintfLine("221 Bye")
+				_ = tp.PrintfLine("221 Bye")
 				return
 			default:
-				tp.PrintfLine("500 unrecognized command")
+				_ = tp.PrintfLine("500 unrecognized command")
 			}
 		}
 	}()

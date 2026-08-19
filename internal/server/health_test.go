@@ -51,14 +51,14 @@ func reachableAddr(t *testing.T) (string, int) {
 	if err != nil {
 		t.Fatalf("failed to listen: %v", err)
 	}
-	t.Cleanup(func() { l.Close() })
+	t.Cleanup(func() { _ = l.Close() })
 	go func() {
 		for {
 			conn, err := l.Accept()
 			if err != nil {
 				return
 			}
-			conn.Close()
+			_ = conn.Close()
 		}
 	}()
 	addr := l.Addr().(*net.TCPAddr)

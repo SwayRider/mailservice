@@ -55,7 +55,7 @@ func (h *HealthServer) probeSMTP() bool {
 	conn, err := net.DialTimeout("tcp", h.smtpAddr, smtpDialTimeout)
 	up := err == nil
 	if up {
-		conn.Close()
+		_ = conn.Close()
 	} else {
 		h.l.Errorf("SMTP health probe failed: %v", err)
 	}

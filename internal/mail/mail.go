@@ -160,16 +160,16 @@ func (m *Mailer) sendWithMandatorySTARTTLS(ctx context.Context, e *email.Email) 
 		return fmt.Errorf("dial smtp server: %w", err)
 	}
 	if err := conn.SetDeadline(time.Now().Add(m.OverallTimeout)); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return fmt.Errorf("set smtp connection deadline: %w", err)
 	}
 
 	c, err := smtp.NewClient(conn, m.Host)
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return fmt.Errorf("init smtp client: %w", err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	if err := c.Hello("localhost"); err != nil {
 		return fmt.Errorf("smtp hello: %w", err)
