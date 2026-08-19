@@ -7,13 +7,21 @@
 // # Endpoint Security
 //
 // Endpoints are registered with different security levels in init():
-//   - Public: SendInternal, SendTemplateInternal (for service-to-service calls)
 //   - Admin: Send, SendTemplate (for authenticated admin users)
-//   - ServiceClient: Send, SendTemplate with "email:send" scope
+//   - ServiceClient: Send, SendTemplate with "email:send" scope (for
+//     service-to-service calls, e.g. from authservice)
 
 package server
 
 import (
+	"context"
+	htmlTemp "html/template"
+	"net"
+	"strconv"
+	"sync"
+	txtTemp "text/template"
+	"time"
+
 	log "github.com/swayrider/swlib/logger"
 	"github.com/swayrider/swlib/security"
 
@@ -24,7 +32,7 @@ import (
 // MailSender is the interface used by MailServer to deliver emails.
 // *mail.Mailer satisfies this interface.
 type MailSender interface {
-	Send(from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error
+	Send(ctx context.Context, from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error
 }
 
 func init() {
@@ -32,13 +40,11 @@ func init() {
 	security.ServiceClientEndpoint("/mail.v1.MailService/Send", []string{
 		"email:send",
 	})
-	security.PublicEndpoint("/mail.v1.MailService/SendInternal")
 
 	security.AdminEndpoint("/mail.v1.MailService/SendTemplate")
 	security.ServiceClientEndpoint("/mail.v1.MailService/SendTemplate", []string{
 		"email:send",
 	})
-	security.PublicEndpoint("/mail.v1.MailService/SendTemplateInternal")
 
 	security.PublicEndpoint("/health.v1.HealthService/Ping")
 	security.PublicEndpoint("/health.v1.HealthService/Check")
@@ -48,26 +54,52 @@ func init() {
 // It combines a filesystem templates directory and an SMTP mailer for delivery.
 type MailServer struct {
 	mailv1.UnimplementedMailServiceServer
-	templatesDir string     // Directory path for email templates
-	mailer       MailSender // SMTP mailer for email delivery
-	l            *log.Logger // Logger instance
+	templatesDir       string      // Directory path for email templates
+	mailer             MailSender  // SMTP mailer for email delivery
+	allowedFromDomains []string    // Domains permitted in the request From address
+	l                  *log.Logger // Logger instance
+
+	htmlTemplates *templateCache[*htmlTemp.Template] // Cache of parsed HTML templates, keyed by name+mtime
+	txtTemplates  *templateCache[*txtTemp.Template]  // Cache of parsed text templates, keyed by name+mtime
 }
 
 // HealthServer implements the HealthService gRPC interface for health checks.
+//
+// Check() probes SMTP reachability rather than reporting UP unconditionally,
+// caching the result for probeTTL to avoid dialing the SMTP server on every
+// orchestrator health check.
 type HealthServer struct {
 	healthv1.UnimplementedHealthServiceServer
-	l *log.Logger // Logger instance
+	smtpAddr string        // SMTP server host:port
+	probeTTL time.Duration // How long a probe result is reused before re-probing
+	l        *log.Logger   // Logger instance
+
+	mu        sync.Mutex
+	lastCheck time.Time
+	lastUp    bool
 }
 
 // NewMailServer creates a new MailServer with the given dependencies.
+//
+// allowedFromDomains restricts the domain of the request-supplied From
+// address; a request From outside this list is rejected. It has no effect
+// on an empty From, which falls back to the mailer's configured user.
 func NewMailServer(
 	templatesDir string,
 	mailer MailSender,
+	allowedFromDomains []string,
 	l *log.Logger,
 ) *MailServer {
 	return &MailServer{
-		templatesDir: templatesDir,
-		mailer:       mailer,
+		templatesDir:       templatesDir,
+		mailer:             mailer,
+		allowedFromDomains: allowedFromDomains,
+		htmlTemplates: newTemplateCache(templatesDir, func(b []byte) (*htmlTemp.Template, error) {
+			return htmlTemp.New("").Parse(string(b))
+		}),
+		txtTemplates: newTemplateCache(templatesDir, func(b []byte) (*txtTemp.Template, error) {
+			return txtTemp.New("").Parse(string(b))
+		}),
 		l: l.Derive(
 			log.WithComponent("MailServer"),
 			log.WithFunction("NewMailServer"),
@@ -90,9 +122,12 @@ func (s *MailServer) Logger() *log.Logger {
 	return s.l
 }
 
-// NewHealthServer creates a new HealthServer with the given logger.
-func NewHealthServer(l *log.Logger) *HealthServer {
+// NewHealthServer creates a new HealthServer that probes the SMTP server at
+// smtpHost:smtpPort, caching the result for probeTTL.
+func NewHealthServer(smtpHost string, smtpPort int, probeTTL time.Duration, l *log.Logger) *HealthServer {
 	return &HealthServer{
+		smtpAddr: net.JoinHostPort(smtpHost, strconv.Itoa(smtpPort)),
+		probeTTL: probeTTL,
 		l: l.Derive(
 			log.WithComponent("HealthServer"),
 			log.WithFunction("NewHealthServer"),

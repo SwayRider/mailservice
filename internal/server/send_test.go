@@ -3,7 +3,11 @@ package server
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	mailv1 "github.com/swayrider/protos/mail/v1"
 	"google.golang.org/grpc/codes"
@@ -33,10 +37,90 @@ func TestSend_Success(t *testing.T) {
 	}
 }
 
+func TestSend_RejectsDisallowedFromDomain(t *testing.T) {
+	var called bool
+	mailer := &mockMailer{
+		sendFn: func(ctx context.Context, from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
+			called = true
+			return nil
+		},
+	}
+	s := newTestMailServer(mailer, t.TempDir())
+
+	_, err := s.Send(context.Background(), &mailv1.SendRequest{
+		From: "spoof@evil.com",
+		To:   []string{"recipient@example.com"},
+	})
+	if err == nil {
+		t.Fatal("expected error for disallowed from domain, got nil")
+	}
+	if code := status.Code(err); code != codes.PermissionDenied {
+		t.Errorf("error code = %v, want %v", code, codes.PermissionDenied)
+	}
+	if called {
+		t.Error("mailer.Send should not be called for a disallowed from domain")
+	}
+}
+
+func TestSend_AllowsEmptyFrom(t *testing.T) {
+	mailer := &mockMailer{}
+	s := newTestMailServer(mailer, t.TempDir())
+
+	_, err := s.Send(context.Background(), &mailv1.SendRequest{
+		To: []string{"recipient@example.com"},
+	})
+	if err != nil {
+		t.Fatalf("Send returned unexpected error: %v", err)
+	}
+}
+
+func TestSend_RejectsInvalidFromAddress(t *testing.T) {
+	s := newTestMailServer(&mockMailer{}, t.TempDir())
+
+	_, err := s.Send(context.Background(), &mailv1.SendRequest{
+		From: "not-an-email",
+		To:   []string{"recipient@example.com"},
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid from address, got nil")
+	}
+	if code := status.Code(err); code != codes.PermissionDenied {
+		t.Errorf("error code = %v, want %v", code, codes.PermissionDenied)
+	}
+}
+
+func TestSend_RejectsEmptyRecipients(t *testing.T) {
+	s := newTestMailServer(&mockMailer{}, t.TempDir())
+
+	_, err := s.Send(context.Background(), &mailv1.SendRequest{
+		From: "sender@example.com",
+	})
+	if err == nil {
+		t.Fatal("expected error for empty recipients, got nil")
+	}
+	if code := status.Code(err); code != codes.InvalidArgument {
+		t.Errorf("error code = %v, want %v", code, codes.InvalidArgument)
+	}
+}
+
+func TestSend_RejectsInvalidRecipientAddress(t *testing.T) {
+	s := newTestMailServer(&mockMailer{}, t.TempDir())
+
+	_, err := s.Send(context.Background(), &mailv1.SendRequest{
+		To: []string{"not-an-email"},
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid recipient address, got nil")
+	}
+	if code := status.Code(err); code != codes.InvalidArgument {
+		t.Errorf("error code = %v, want %v", code, codes.InvalidArgument)
+	}
+}
+
 func TestSend_MailerError(t *testing.T) {
 	smtpErr := errors.New("smtp: connection refused")
 	mailer := &mockMailer{
-		sendFn: func(from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
+		sendFn: func(ctx context.Context, from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
 			return smtpErr
 		},
 	}
@@ -52,30 +136,8 @@ func TestSend_MailerError(t *testing.T) {
 	if code := status.Code(err); code != codes.Internal {
 		t.Errorf("error code = %v, want %v", code, codes.Internal)
 	}
-}
-
-func TestSendInternal_DelegatesToSend(t *testing.T) {
-	var called bool
-	mailer := &mockMailer{
-		sendFn: func(from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
-			called = true
-			return nil
-		},
-	}
-	s := newTestMailServer(mailer, t.TempDir())
-
-	resp, err := s.SendInternal(context.Background(), &mailv1.SendRequest{
-		To:      []string{"recipient@example.com"},
-		Subject: "Hello",
-	})
-	if err != nil {
-		t.Fatalf("SendInternal returned unexpected error: %v", err)
-	}
-	if resp.Message != "email sent" {
-		t.Errorf("resp.Message = %q, want %q", resp.Message, "email sent")
-	}
-	if !called {
-		t.Error("expected mailer.Send to be called")
+	if strings.Contains(status.Convert(err).Message(), smtpErr.Error()) {
+		t.Errorf("error message leaks the raw SMTP error: %v", err)
 	}
 }
 
@@ -86,7 +148,7 @@ func TestSendInternal_DelegatesToSend(t *testing.T) {
 func TestSendTemplate_Success(t *testing.T) {
 	var gotHTML, gotText string
 	mailer := &mockMailer{
-		sendFn: func(from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
+		sendFn: func(ctx context.Context, from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
 			gotHTML = htmlBody
 			gotText = textBody
 			return nil
@@ -120,6 +182,166 @@ func TestSendTemplate_Success(t *testing.T) {
 	}
 }
 
+func TestSendTemplate_PicksUpChangedTemplateContent(t *testing.T) {
+	var gotHTML string
+	mailer := &mockMailer{
+		sendFn: func(ctx context.Context, from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
+			gotHTML = htmlBody
+			return nil
+		},
+	}
+	dir := writeTemplates(t, map[string]string{
+		"test.html": `<p>Version 1</p>`,
+		"test.txt":  `Hello`,
+	})
+	s := newTestMailServer(mailer, dir)
+
+	req := &mailv1.SendTemplateRequest{
+		To:           []string{"recipient@example.com"},
+		HtmlTemplate: "test.html",
+		TextTemplate: "test.txt",
+	}
+
+	if _, err := s.SendTemplate(context.Background(), req); err != nil {
+		t.Fatalf("first SendTemplate returned unexpected error: %v", err)
+	}
+	if gotHTML != "<p>Version 1</p>" {
+		t.Fatalf("first HTML body = %q, want %q", gotHTML, "<p>Version 1</p>")
+	}
+
+	// Overwrite the template file (which advances its mtime) and force the
+	// mtime forward explicitly, so the assertion below doesn't depend on
+	// wall-clock resolution between the two writes.
+	path := filepath.Join(dir, "test.html")
+	if err := os.WriteFile(path, []byte(`<p>Version 2</p>`), 0o644); err != nil {
+		t.Fatalf("failed to overwrite template: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	later := info.ModTime().Add(time.Second)
+	if err := os.Chtimes(path, later, later); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	if _, err := s.SendTemplate(context.Background(), req); err != nil {
+		t.Fatalf("second SendTemplate returned unexpected error: %v", err)
+	}
+	if gotHTML != "<p>Version 2</p>" {
+		t.Errorf("second HTML body = %q, want %q (edited template should take effect live)", gotHTML, "<p>Version 2</p>")
+	}
+}
+
+func TestSendTemplate_ReusesCacheWhenFileUnchanged(t *testing.T) {
+	mailer := &mockMailer{}
+	dir := writeTemplates(t, map[string]string{
+		"test.html": `<p>Hello</p>`,
+		"test.txt":  `Hello`,
+	})
+	s := newTestMailServer(mailer, dir)
+
+	req := &mailv1.SendTemplateRequest{
+		To:           []string{"recipient@example.com"},
+		HtmlTemplate: "test.html",
+		TextTemplate: "test.txt",
+	}
+
+	if _, err := s.SendTemplate(context.Background(), req); err != nil {
+		t.Fatalf("first SendTemplate returned unexpected error: %v", err)
+	}
+
+	// Overwrite the file with content that would fail to parse if it were
+	// ever re-read, but reset its mtime back to the original value so the
+	// cache should still consider it unchanged.
+	path := filepath.Join(dir, "test.html")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	origModTime := info.ModTime()
+	if err := os.WriteFile(path, []byte(`{{range}}{{end}}`), 0o644); err != nil {
+		t.Fatalf("failed to overwrite template: %v", err)
+	}
+	if err := os.Chtimes(path, origModTime, origModTime); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	if _, err := s.SendTemplate(context.Background(), req); err != nil {
+		t.Errorf("second SendTemplate returned error %v, want nil (cache should have been reused instead of re-parsing the broken content)", err)
+	}
+}
+
+func TestSendTemplate_RejectsDisallowedFromDomain(t *testing.T) {
+	var called bool
+	mailer := &mockMailer{
+		sendFn: func(ctx context.Context, from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
+			called = true
+			return nil
+		},
+	}
+	dir := writeTemplates(t, map[string]string{
+		"test.html": `<p>Hello</p>`,
+		"test.txt":  `Hello`,
+	})
+	s := newTestMailServer(mailer, dir)
+
+	_, err := s.SendTemplate(context.Background(), &mailv1.SendTemplateRequest{
+		From:         "spoof@evil.com",
+		To:           []string{"recipient@example.com"},
+		HtmlTemplate: "test.html",
+		TextTemplate: "test.txt",
+	})
+	if err == nil {
+		t.Fatal("expected error for disallowed from domain, got nil")
+	}
+	if code := status.Code(err); code != codes.PermissionDenied {
+		t.Errorf("error code = %v, want %v", code, codes.PermissionDenied)
+	}
+	if called {
+		t.Error("mailer.Send should not be called for a disallowed from domain")
+	}
+}
+
+func TestSendTemplate_RejectsEmptyRecipients(t *testing.T) {
+	dir := writeTemplates(t, map[string]string{
+		"test.html": `<p>Hello</p>`,
+		"test.txt":  `Hello`,
+	})
+	s := newTestMailServer(&mockMailer{}, dir)
+
+	_, err := s.SendTemplate(context.Background(), &mailv1.SendTemplateRequest{
+		HtmlTemplate: "test.html",
+		TextTemplate: "test.txt",
+	})
+	if err == nil {
+		t.Fatal("expected error for empty recipients, got nil")
+	}
+	if code := status.Code(err); code != codes.InvalidArgument {
+		t.Errorf("error code = %v, want %v", code, codes.InvalidArgument)
+	}
+}
+
+func TestSendTemplate_RejectsInvalidRecipientAddress(t *testing.T) {
+	dir := writeTemplates(t, map[string]string{
+		"test.html": `<p>Hello</p>`,
+		"test.txt":  `Hello`,
+	})
+	s := newTestMailServer(&mockMailer{}, dir)
+
+	_, err := s.SendTemplate(context.Background(), &mailv1.SendTemplateRequest{
+		To:           []string{"not-an-email"},
+		HtmlTemplate: "test.html",
+		TextTemplate: "test.txt",
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid recipient address, got nil")
+	}
+	if code := status.Code(err); code != codes.InvalidArgument {
+		t.Errorf("error code = %v, want %v", code, codes.InvalidArgument)
+	}
+}
+
 func TestSendTemplate_MissingHTMLTemplate(t *testing.T) {
 	dir := writeTemplates(t, map[string]string{
 		"test.txt": `Hello`,
@@ -127,14 +349,18 @@ func TestSendTemplate_MissingHTMLTemplate(t *testing.T) {
 	s := newTestMailServer(&mockMailer{}, dir)
 
 	_, err := s.SendTemplate(context.Background(), &mailv1.SendTemplateRequest{
+		To:           []string{"recipient@example.com"},
 		HtmlTemplate: "missing.html",
 		TextTemplate: "test.txt",
 	})
 	if err == nil {
 		t.Fatal("expected error for missing HTML template, got nil")
 	}
-	if code := status.Code(err); code != codes.InvalidArgument {
-		t.Errorf("error code = %v, want %v", code, codes.InvalidArgument)
+	if code := status.Code(err); code != codes.NotFound {
+		t.Errorf("error code = %v, want %v", code, codes.NotFound)
+	}
+	if strings.Contains(status.Convert(err).Message(), dir) {
+		t.Errorf("error message leaks the templates directory path: %v", err)
 	}
 }
 
@@ -145,14 +371,18 @@ func TestSendTemplate_MissingTextTemplate(t *testing.T) {
 	s := newTestMailServer(&mockMailer{}, dir)
 
 	_, err := s.SendTemplate(context.Background(), &mailv1.SendTemplateRequest{
+		To:           []string{"recipient@example.com"},
 		HtmlTemplate: "test.html",
 		TextTemplate: "missing.txt",
 	})
 	if err == nil {
 		t.Fatal("expected error for missing text template, got nil")
 	}
-	if code := status.Code(err); code != codes.InvalidArgument {
-		t.Errorf("error code = %v, want %v", code, codes.InvalidArgument)
+	if code := status.Code(err); code != codes.NotFound {
+		t.Errorf("error code = %v, want %v", code, codes.NotFound)
+	}
+	if strings.Contains(status.Convert(err).Message(), dir) {
+		t.Errorf("error message leaks the templates directory path: %v", err)
 	}
 }
 
@@ -165,6 +395,7 @@ func TestSendTemplate_InvalidHTMLTemplateSyntax(t *testing.T) {
 	s := newTestMailServer(&mockMailer{}, dir)
 
 	_, err := s.SendTemplate(context.Background(), &mailv1.SendTemplateRequest{
+		To:           []string{"recipient@example.com"},
 		HtmlTemplate: "bad.html",
 		TextTemplate: "ok.txt",
 	})
@@ -173,6 +404,9 @@ func TestSendTemplate_InvalidHTMLTemplateSyntax(t *testing.T) {
 	}
 	if code := status.Code(err); code != codes.Internal {
 		t.Errorf("error code = %v, want %v", code, codes.Internal)
+	}
+	if strings.Contains(status.Convert(err).Message(), "range") {
+		t.Errorf("error message leaks raw template parse error: %v", err)
 	}
 }
 
@@ -184,6 +418,7 @@ func TestSendTemplate_InvalidTextTemplateSyntax(t *testing.T) {
 	s := newTestMailServer(&mockMailer{}, dir)
 
 	_, err := s.SendTemplate(context.Background(), &mailv1.SendTemplateRequest{
+		To:           []string{"recipient@example.com"},
 		HtmlTemplate: "ok.html",
 		TextTemplate: "bad.txt",
 	})
@@ -193,12 +428,16 @@ func TestSendTemplate_InvalidTextTemplateSyntax(t *testing.T) {
 	if code := status.Code(err); code != codes.Internal {
 		t.Errorf("error code = %v, want %v", code, codes.Internal)
 	}
+	if strings.Contains(status.Convert(err).Message(), "range") {
+		t.Errorf("error message leaks raw template parse error: %v", err)
+	}
 }
 
 func TestSendTemplate_MailerError(t *testing.T) {
+	smtpErr := errors.New("smtp: connection refused")
 	mailer := &mockMailer{
-		sendFn: func(from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
-			return errors.New("smtp: connection refused")
+		sendFn: func(ctx context.Context, from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
+			return smtpErr
 		},
 	}
 	dir := writeTemplates(t, map[string]string{
@@ -218,34 +457,134 @@ func TestSendTemplate_MailerError(t *testing.T) {
 	if code := status.Code(err); code != codes.Internal {
 		t.Errorf("error code = %v, want %v", code, codes.Internal)
 	}
+	if strings.Contains(status.Convert(err).Message(), smtpErr.Error()) {
+		t.Errorf("error message leaks the raw SMTP error: %v", err)
+	}
 }
 
-func TestSendTemplateInternal_DelegatesToSendTemplate(t *testing.T) {
+func TestSendTemplate_PathTraversalHTMLTemplate(t *testing.T) {
 	var called bool
 	mailer := &mockMailer{
-		sendFn: func(from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
+		sendFn: func(ctx context.Context, from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
+			called = true
+			return nil
+		},
+	}
+	dir := writeTemplates(t, map[string]string{
+		"test.txt": `Hello`,
+	})
+	s := newTestMailServer(mailer, dir)
+
+	_, err := s.SendTemplate(context.Background(), &mailv1.SendTemplateRequest{
+		HtmlTemplate: "../../../../etc/passwd",
+		TextTemplate: "test.txt",
+	})
+	if err == nil {
+		t.Fatal("expected error for path traversal in HTML template, got nil")
+	}
+	if code := status.Code(err); code != codes.InvalidArgument {
+		t.Errorf("error code = %v, want %v", code, codes.InvalidArgument)
+	}
+	if called {
+		t.Error("mailer.Send should not be called for a rejected template name")
+	}
+}
+
+func TestSendTemplate_PathTraversalTextTemplate(t *testing.T) {
+	var called bool
+	mailer := &mockMailer{
+		sendFn: func(ctx context.Context, from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
 			called = true
 			return nil
 		},
 	}
 	dir := writeTemplates(t, map[string]string{
 		"test.html": `<p>Hello</p>`,
-		"test.txt":  `Hello`,
 	})
 	s := newTestMailServer(mailer, dir)
 
-	resp, err := s.SendTemplateInternal(context.Background(), &mailv1.SendTemplateRequest{
+	_, err := s.SendTemplate(context.Background(), &mailv1.SendTemplateRequest{
+		HtmlTemplate: "test.html",
+		TextTemplate: "../../../../etc/passwd",
+	})
+	if err == nil {
+		t.Fatal("expected error for path traversal in text template, got nil")
+	}
+	if code := status.Code(err); code != codes.InvalidArgument {
+		t.Errorf("error code = %v, want %v", code, codes.InvalidArgument)
+	}
+	if called {
+		t.Error("mailer.Send should not be called for a rejected template name")
+	}
+}
+
+func TestSendTemplate_AbsolutePathTemplate(t *testing.T) {
+	dir := writeTemplates(t, map[string]string{
+		"test.txt": `Hello`,
+	})
+	s := newTestMailServer(&mockMailer{}, dir)
+
+	_, err := s.SendTemplate(context.Background(), &mailv1.SendTemplateRequest{
+		HtmlTemplate: "/etc/passwd",
+		TextTemplate: "test.txt",
+	})
+	if err == nil {
+		t.Fatal("expected error for absolute path template, got nil")
+	}
+	if code := status.Code(err); code != codes.InvalidArgument {
+		t.Errorf("error code = %v, want %v", code, codes.InvalidArgument)
+	}
+}
+
+func TestSendTemplate_MissingDataKeyRendersEmpty(t *testing.T) {
+	var gotHTML, gotText string
+	mailer := &mockMailer{
+		sendFn: func(ctx context.Context, from string, to []string, cc []string, bcc []string, subject string, htmlBody string, textBody string) error {
+			gotHTML = htmlBody
+			gotText = textBody
+			return nil
+		},
+	}
+	dir := writeTemplates(t, map[string]string{
+		"test.html": `<p>Hello {{index . "Name"}}!</p>`,
+		"test.txt":  `Hello {{index . "Name"}}!`,
+	})
+	s := newTestMailServer(mailer, dir)
+
+	// Data intentionally omits "Name", the key both templates reference.
+	_, err := s.SendTemplate(context.Background(), &mailv1.SendTemplateRequest{
 		To:           []string{"recipient@example.com"},
 		HtmlTemplate: "test.html",
 		TextTemplate: "test.txt",
+		Data:         map[string]string{"Other": "value"},
 	})
 	if err != nil {
-		t.Fatalf("SendTemplateInternal returned unexpected error: %v", err)
+		t.Fatalf("SendTemplate returned unexpected error for a missing data key: %v", err)
 	}
-	if resp.Message != "email sent" {
-		t.Errorf("resp.Message = %q, want %q", resp.Message, "email sent")
+	if gotHTML != "<p>Hello !</p>" {
+		t.Errorf("HTML body = %q, want %q (missing key should render empty)", gotHTML, "<p>Hello !</p>")
 	}
-	if !called {
-		t.Error("expected mailer.Send to be called")
+	if gotText != "Hello !" {
+		t.Errorf("text body = %q, want %q (missing key should render empty)", gotText, "Hello !")
+	}
+}
+
+func TestSendTemplate_HiddenOrEmptyTemplateName(t *testing.T) {
+	dir := writeTemplates(t, map[string]string{
+		"test.txt": `Hello`,
+	})
+	s := newTestMailServer(&mockMailer{}, dir)
+
+	for _, name := range []string{"", ".hidden"} {
+		_, err := s.SendTemplate(context.Background(), &mailv1.SendTemplateRequest{
+			HtmlTemplate: name,
+			TextTemplate: "test.txt",
+		})
+		if err == nil {
+			t.Fatalf("expected error for HTML template name %q, got nil", name)
+		}
+		if code := status.Code(err); code != codes.InvalidArgument {
+			t.Errorf("template name %q: error code = %v, want %v", name, code, codes.InvalidArgument)
+		}
 	}
 }

@@ -11,34 +11,32 @@
 //
 // # Authentication
 //
-// The service fetches JWT public keys from the authservice to verify tokens.
-// Two background routines maintain the key cache:
-//   - publicKeyFetcher: Periodically fetches keys from authservice
-//   - publicKeyListener: Updates the local cache when new keys arrive
+// The service fetches JWT public keys from the authservice to verify
+// tokens, keeping them refreshed in the background via a swlib/jwtkeys.Cache
+// (see JWT_KEYS_REFRESH_INTERVAL_SECS / JWT_KEYS_FETCH_TIMEOUT_SECS).
 //
 // # Endpoints
 //
-// Email endpoints have dual access patterns:
+// Email endpoints require authentication:
 //   - Send/SendTemplate: Requires admin or service client with "email:send" scope
-//   - SendInternal/SendTemplateInternal: Public (for internal service-to-service calls)
 package main
 
 import (
 	"context"
-	"fmt"
+	"strings"
+	"time"
 
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
-	"google.golang.org/grpc"
 	"github.com/swayrider/grpcclients"
 	"github.com/swayrider/grpcclients/authclient"
+	"github.com/swayrider/mailservice/internal/mail"
+	"github.com/swayrider/mailservice/internal/server"
 	healthv1 "github.com/swayrider/protos/health/v1"
 	mailv1 "github.com/swayrider/protos/mail/v1"
-	"github.com/swayrider/mailservice/internal/mail"
-	"github.com/swayrider/mailservice/internal/repository"
-	"github.com/swayrider/mailservice/internal/server"
 	"github.com/swayrider/swlib/app"
-	"github.com/swayrider/swlib/cache"
+	"github.com/swayrider/swlib/jwtkeys"
 	log "github.com/swayrider/swlib/logger"
+	"google.golang.org/grpc"
 )
 
 /*
@@ -69,6 +67,8 @@ Environment variables:
 	SMTP_PORT
 	SMTP_USER
 	SMTP_PASSWORD
+
+	MAIL_ALLOWED_FROM_DOMAINS
 */
 
 const (
@@ -90,11 +90,25 @@ const (
 	DefSmtpPort     = 587
 	DefSmtpUser     = ""
 	DefSmtpPassword = ""
+
+	FldSmtpDialTimeoutSecs = "smtp-dial-timeout-secs"
+	EnvSmtpDialTimeoutSecs = "SMTP_DIAL_TIMEOUT_SECS"
+	DefSmtpDialTimeoutSecs = 5
+
+	FldSmtpTimeoutSecs = "smtp-timeout-secs"
+	EnvSmtpTimeoutSecs = "SMTP_TIMEOUT_SECS"
+	DefSmtpTimeoutSecs = 30
+
+	FldHealthProbeTtlSecs = "health-probe-ttl-secs"
+	EnvHealthProbeTTLSecs = "HEALTH_PROBE_TTL_SECS"
+	DefHealthProbeTtlSecs = 15
+
+	FldMailAllowedFromDomains = "mail-allowed-from-domains"
+	EnvMailAllowedFromDomains = "MAIL_ALLOWED_FROM_DOMAINS"
+	DefMailAllowedFromDomains = ""
 )
 
 func main() {
-	keyChan := make(chan []string)
-
 	application := app.New("mailservice").
 		WithDefaultConfigFields(app.BackendServiceFields, app.FlagGroupOverrides{}).
 		WithServiceClients(
@@ -111,15 +125,30 @@ func main() {
 				FldSmtpUser, EnvSmtpUser, "SMTP user", DefSmtpUser),
 			app.NewStringConfigField(
 				FldSmtpPassword, EnvSmtpPassword, "SMTP password", DefSmtpPassword),
+			app.NewIntConfigField(
+				FldSmtpDialTimeoutSecs, EnvSmtpDialTimeoutSecs,
+				"Timeout in seconds for establishing the SMTP connection", DefSmtpDialTimeoutSecs),
+			app.NewIntConfigField(
+				FldSmtpTimeoutSecs, EnvSmtpTimeoutSecs,
+				"Timeout in seconds for the entire SMTP transaction", DefSmtpTimeoutSecs),
+			app.NewIntConfigField(
+				FldHealthProbeTtlSecs, EnvHealthProbeTTLSecs,
+				"How long in seconds a health probe result is cached before re-probing SMTP",
+				DefHealthProbeTtlSecs),
+			app.NewStringConfigField(
+				FldMailAllowedFromDomains, EnvMailAllowedFromDomains,
+				"Comma-separated list of domains allowed in the request From address "+
+					"(defaults to the SMTP user's domain if unset)",
+				DefMailAllowedFromDomains),
 		).
-		WithBackgroundRoutines(
-			publicKeyListener(keyChan),
-			publicKeyFetcher(keyChan),
-		)
+		WithConfigFields(app.RateLimitConfigFields()...).
+		WithConfigFields(app.JWTKeysConfigFields()...)
+
+	jwtKeyCache := jwtkeys.New(application.Logger())
 
 	grpcConfig := app.NewGrpcConfig(
-		app.AuthInterceptor,
-		getPublicKeys,
+		app.AuthInterceptor|app.RateLimitInterceptor,
+		jwtKeyCache.GetPublicKeys,
 		app.GrpcServiceHooks{
 			ServiceRegistrar:   grpcMailRegistrar,
 			ServiceHTTPHandler: grpcMailGateway(application),
@@ -129,7 +158,17 @@ func main() {
 			ServiceHTTPHandler: grpcHealthGateway(application),
 		},
 	)
-	application = application.WithGrpc(grpcConfig)
+	// mailservice has no attachment support (text/html body + template data
+	// only), so a cap well below gRPC's ~4MB implicit default is safe.
+	grpcConfig.SetMaxRecvMsgSize(2 << 20)
+
+	application = application.
+		WithBackgroundRoutines(
+			app.JWTKeysFetcher(jwtKeyCache),
+			app.RateLimitEvictor(grpcConfig),
+		).
+		WithInitializers(app.JWTKeysInitializer(jwtKeyCache), app.RateLimiterInitializer(grpcConfig)).
+		WithGrpc(grpcConfig)
 	application.Run()
 }
 
@@ -145,53 +184,6 @@ func authServiceClientCtor(a app.App) grpcclients.Client {
 	return clnt
 }
 
-// publicKeyListener is a background routine that listens for JWT public key updates.
-// When new keys are received on the channel, they are stored in the local cache.
-func publicKeyListener(keyChan chan []string) func(app.App) {
-	return func(a app.App) {
-		ctx := a.BackgroundContext()
-		defer func() {
-			a.BackgroundWaitGroup().Done()
-		}()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case keys := <-keyChan:
-				cache.LCSet(repository.JwtPublicKeys, keys)
-			}
-		}
-	}
-}
-
-// publicKeyFetcher is a background routine that periodically fetches JWT public keys
-// from the authservice and sends them to the listener via the channel.
-func publicKeyFetcher(keyChan chan []string) func(app.App) {
-	return func(a app.App) {
-		ctx := a.BackgroundContext()
-		defer func() {
-			a.BackgroundWaitGroup().Done()
-		}()
-		clnt := app.GetServiceClient[*authclient.Client](a, "authservice")
-		authclient.PublicKeyFetcher(ctx, clnt, keyChan)
-	}
-}
-
-// getPublicKeys retrieves JWT public keys from the local cache.
-// This function is called by the gRPC auth interceptor to verify tokens.
-func getPublicKeys() ([]string, error) {
-	keysIface, ok := cache.LCGet(repository.JwtPublicKeys)
-	if !ok {
-		return nil, fmt.Errorf("no public keys found")
-	}
-
-	keys, ok := keysIface.([]string)
-	if !ok {
-		return nil, fmt.Errorf("invalid public keys")
-	}
-	return keys, nil
-}
-
 // grpcMailRegistrar registers the MailService gRPC server with the registrar.
 func grpcMailRegistrar(r grpc.ServiceRegistrar, a app.App) {
 	templatesDir := app.GetConfigField[string](a.Config(), FldMailTemplatesDir)
@@ -199,16 +191,52 @@ func grpcMailRegistrar(r grpc.ServiceRegistrar, a app.App) {
 	password := app.GetConfigField[string](a.Config(), FldSmtpPassword)
 	host := app.GetConfigField[string](a.Config(), FldSmtpHost)
 	port := app.GetConfigField[int](a.Config(), FldSmtpPort)
+	dialTimeoutSecs := app.GetConfigField[int](a.Config(), FldSmtpDialTimeoutSecs)
+	timeoutSecs := app.GetConfigField[int](a.Config(), FldSmtpTimeoutSecs)
+	allowedFromDomains := app.GetConfigField[string](a.Config(), FldMailAllowedFromDomains)
 
 	srv := server.NewMailServer(
 		templatesDir,
-		mail.NewMailer(user, password, host, port), a.Logger())
+		mail.NewMailer(
+			user, password, host, port,
+			time.Duration(dialTimeoutSecs)*time.Second,
+			time.Duration(timeoutSecs)*time.Second),
+		resolveAllowedFromDomains(allowedFromDomains, user, a.Logger()),
+		a.Logger())
 	mailv1.RegisterMailServiceServer(r, srv)
+}
+
+// resolveAllowedFromDomains parses the configured comma-separated domain
+// list. If it is unset, the allowlist is derived from the SMTP user's
+// domain, so the service is secure-by-default without extra configuration.
+// If the SMTP user has no domain (e.g. a bare local-dev username), every
+// domain is allowed and a warning is logged.
+func resolveAllowedFromDomains(configured string, smtpUser string, l *log.Logger) []string {
+	if configured != "" {
+		domains := strings.Split(configured, ",")
+		for i, d := range domains {
+			domains[i] = strings.TrimSpace(d)
+		}
+		return domains
+	}
+
+	if i := strings.LastIndex(smtpUser, "@"); i >= 0 {
+		return []string{smtpUser[i+1:]}
+	}
+
+	l.Derive(log.WithFunction("resolveAllowedFromDomains")).Warnf(
+		"MAIL_ALLOWED_FROM_DOMAINS is unset and SMTP_USER %q has no domain to derive a default from; "+
+			"allowing any From domain", smtpUser)
+	return nil
 }
 
 // grpcHealthRegistrar registers the HealthService gRPC server with the registrar.
 func grpcHealthRegistrar(r grpc.ServiceRegistrar, a app.App) {
-	srv := server.NewHealthServer(a.Logger())
+	host := app.GetConfigField[string](a.Config(), FldSmtpHost)
+	port := app.GetConfigField[int](a.Config(), FldSmtpPort)
+	probeTTLSecs := app.GetConfigField[int](a.Config(), FldHealthProbeTtlSecs)
+
+	srv := server.NewHealthServer(host, port, time.Duration(probeTTLSecs)*time.Second, a.Logger())
 	healthv1.RegisterHealthServiceServer(r, srv)
 }
 

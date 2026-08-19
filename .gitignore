@@ -4,3 +4,6 @@ local.env
 # REST collections moved to testing repo
 REST/
 rest/
+
+.DS_Store
+

@@ -2,7 +2,7 @@
 
 Email delivery service for the SwayRider platform. Sends transactional emails via SMTP with support for both raw content and template-based emails. Templates are bundled in the container and rendered with Go's template engine.
 
-> **Security Note:** The mailservice should not be directly exposed to the internet. It provides internal endpoints for service-to-service communication and protected endpoints for admin/service client access.
+> **Security Note:** The mailservice should not be directly exposed to the internet. All send endpoints require a valid admin JWT or service-client token with the `email:send` scope — there are no unauthenticated endpoints.
 
 ## Architecture
 
@@ -20,10 +20,7 @@ The mailservice exposes two server interfaces:
 
 ### Background Processes
 
-The service runs two background routines:
-
-1. **Public Key Fetcher**: Periodically fetches JWT public keys from authservice
-2. **Public Key Listener**: Caches received public keys for JWT verification
+The service runs a `swlib/jwtkeys.Cache`-backed background routine that periodically fetches JWT public keys from authservice and refreshes the in-memory cache used for token verification (see `JWT_KEYS_REFRESH_INTERVAL_SECS` / `JWT_KEYS_FETCH_TIMEOUT_SECS` below).
 
 ## Configuration
 
@@ -44,12 +41,36 @@ Configuration is provided via environment variables or CLI flags.
 | `SMTP_PORT` | `-smtp-port` | 587 | SMTP server port |
 | `SMTP_USER` | `-smtp-user` | | SMTP authentication username |
 | `SMTP_PASSWORD` | `-smtp-password` | | SMTP authentication password |
+| `MAIL_ALLOWED_FROM_DOMAINS` | `-mail-allowed-from-domains` | (derived from `SMTP_USER`) | Comma-separated list of domains allowed in the request `From` address. If unset, defaults to `SMTP_USER`'s domain |
+| `SMTP_DIAL_TIMEOUT_SECS` | `-smtp-dial-timeout-secs` | `5` | Timeout for establishing the SMTP connection |
+| `SMTP_TIMEOUT_SECS` | `-smtp-timeout-secs` | `30` | Timeout for the entire SMTP transaction |
+
+### Health
+
+| Environment Variable | CLI Flag | Default | Description |
+| -------------------- | -------- | ------- | ----------- |
+| `HEALTH_PROBE_TTL_SECS` | `-health-probe-ttl-secs` | `15` | How long a health probe result is cached before re-probing SMTP |
+
+### Rate Limiting
+
+| Environment Variable | CLI Flag | Default | Description |
+| -------------------- | -------- | ------- | ----------- |
+| `RATE_LIMIT_RPS` | `-rate-limit-rps` | `50` | Requests per second allowed per source IP |
+| `RATE_LIMIT_BURST` | `-rate-limit-burst` | `100` | Burst allowance per source IP |
+| `RATE_LIMIT_IDLE_TTL_SECS` | `-rate-limit-idle-ttl-secs` | `300` | How long an idle per-IP rate limiter entry is kept |
+
+### JWT Key Cache
+
+| Environment Variable | CLI Flag | Default | Description |
+| -------------------- | -------- | ------- | ----------- |
+| `JWT_KEYS_REFRESH_INTERVAL_SECS` | `-jwt-keys-refresh-interval-secs` | `300` | How often the JWT public-key cache is refreshed from authservice |
+| `JWT_KEYS_FETCH_TIMEOUT_SECS` | `-jwt-keys-fetch-timeout-secs` | `15` | Timeout for a single public-key fetch |
 
 ### Template Configuration
 
 | Environment Variable | CLI Flag | Default | Description |
 | -------------------- | -------- | ------- | ----------- |
-| `MAIL_TEMPLATES_DIR` | `-mail-templates-dir` | `assets/mail/templates` | Directory containing email templates (bundled in container) |
+| `MAIL_TEMPLATES_DIR` | `-mail-templates-dir` | `assets/templates` | Directory containing email templates (bundled in container) |
 
 ### Service Dependencies
 
@@ -60,19 +81,19 @@ Configuration is provided via environment variables or CLI flags.
 
 ## API Reference
 
-The API is defined in the Protocol Buffer files at `backend/protos/mail/v1/` and `backend/protos/health/v1/`.
+The API is defined in the Protocol Buffer files at `protos/mail/v1/` and `protos/health/v1/`.
 
 ### Endpoint Access Levels
 
 | Level | Description |
 | ----- | ----------- |
-| **Public** | No authentication required (internal service endpoints) |
-| **Admin** | Requires valid JWT with admin privileges |
+| **Public** | No authentication required (health endpoints only) |
+| **Admin** | Requires valid JWT with admin privileges (a valid JWT for a non-admin user is rejected) |
 | **Service Client** | Requires service client token with `email:send` scope |
 
-The mailservice provides two variants of each send endpoint:
-- **Standard endpoints** (`Send`, `SendTemplate`): Protected, require admin or service client authentication
-- **Internal endpoints** (`SendInternal`, `SendTemplateInternal`): Public, intended for internal service-to-service calls within the trusted network
+Both send endpoints (`Send`, `SendTemplate`) require admin or service client authentication.
+Service-to-service callers (e.g. authservice) obtain an `email:send`-scoped token and pass it as
+`Authorization: Bearer <token>`.
 
 ---
 
@@ -108,6 +129,11 @@ Simple health check that returns HTTP 200.
 
 ### Email Sending Endpoints
 
+Both endpoints validate the request before sending: `from`, if set, must be a syntactically valid
+address whose domain is in `MAIL_ALLOWED_FROM_DOMAINS` (an empty `from` falls back to `SMTP_USER`
+and is not checked); `to`/`cc`/`bcc` addresses must be syntactically valid and `to` must be
+non-empty.
+
 #### Send (Protected)
 
 Sends an email with raw HTML and text content.
@@ -128,33 +154,6 @@ curl --request POST \
     "subject": "Welcome to SwayRider",
     "htmlBody": "<html><body><h1>Welcome!</h1><p>Thank you for joining.</p></body></html>",
     "textBody": "Welcome!\n\nThank you for joining."
-  }'
-```
-
-Response:
-```json
-{
-  "message": "email sent"
-}
-```
-
-#### Send Internal
-
-Sends an email with raw HTML and text content. Intended for internal service-to-service communication.
-
-- **Endpoint:** `POST /api/v1/mail/internal/send`
-- **Access:** Public (internal network only)
-
-```bash
-curl --request POST \
-  --url http://localhost:8080/api/v1/mail/internal/send \
-  --header 'content-type: application/json' \
-  --data '{
-    "from": "noreply@example.com",
-    "to": ["user@example.com"],
-    "subject": "Password Reset",
-    "htmlBody": "<html><body><p>Click <a href=\"...\">here</a> to reset.</p></body></html>",
-    "textBody": "Click the following link to reset your password: ..."
   }'
 ```
 
@@ -197,41 +196,9 @@ Response:
 }
 ```
 
-#### Send Template Internal
-
-Sends a templated email. Intended for internal service-to-service communication.
-
-- **Endpoint:** `POST /api/v1/mail/internal/send-template`
-- **Access:** Public (internal network only)
-
-```bash
-curl --request POST \
-  --url http://localhost:8080/api/v1/mail/internal/send-template \
-  --header 'content-type: application/json' \
-  --data '{
-    "from": "noreply@example.com",
-    "to": ["user@example.com"],
-    "subject": "Verify Your Email",
-    "htmlTemplate": "verify_user.html",
-    "textTemplate": "verify_user.txt",
-    "data": {
-      "Email": "user@example.com",
-      "VerificationURL": "https://app.example.com/verify?u=123&t=abc",
-      "Year": "2025"
-    }
-  }'
-```
-
-Response:
-```json
-{
-  "message": "email sent"
-}
-```
-
 ## Email Templates
 
-Email templates are bundled in the container under `assets/mail/templates` and use Go's standard `html/template` and `text/template` packages. The directory can be overridden via `MAIL_TEMPLATES_DIR`.
+Email templates are bundled in the container under `assets/templates` and use Go's standard `html/template` and `text/template` packages. The directory can be overridden via `MAIL_TEMPLATES_DIR`.
 
 ### Template Storage
 
@@ -241,6 +208,8 @@ assets/templates/
 ├── verify_user.txt
 ├── reset_password.html
 ├── reset_password.txt
+├── invite_user.html
+├── invite_user.txt
 ├── test.html
 └── test.txt
 ```
@@ -283,25 +252,25 @@ The authservice uses the following templates (bundled in the container):
 | -------- | ------- |
 | `verify_user.html` / `verify_user.txt` | Email verification |
 | `reset_password.html` / `reset_password.txt` | Password reset |
+| `invite_user.html` / `invite_user.txt` | Invite-only registration email |
 
 ## Security Considerations
 
-- **Internal Endpoints**: The `*Internal` endpoints are public and should only be accessible within the trusted internal network. Ensure proper network segmentation.
+- **Service-to-Service Calls**: Callers such as authservice must obtain an `email:send`-scoped service-client token and pass it as `Authorization: Bearer <token>` — there is no unauthenticated path to any send endpoint.
 - **SMTP Credentials**: Store SMTP credentials securely using environment variables or a secrets manager.
-- **Rate Limiting**: Consider implementing rate limiting at the infrastructure level to prevent email abuse.
+- **Rate Limiting**: Per-source-IP rate limiting is built in (`RATE_LIMIT_RPS` / `RATE_LIMIT_BURST` / `RATE_LIMIT_IDLE_TTL_SECS`, see Configuration above).
 
 ## Building
 
 ```bash
-# Generate protobuf code (run from repo root)
-make proto
+# Generate protobuf code
+cd protos && make
 
 # Build the service
-cd backend
-go build ./services/mailservice/cmd/mailservice
+go build ./cmd/mailservice
 
 # Run the service
-go run ./services/mailservice/cmd/mailservice
+go run ./cmd/mailservice
 ```
 
 ## Docker
@@ -310,6 +279,19 @@ go run ./services/mailservice/cmd/mailservice
 # Build container (from mailservice/ directory)
 make container-build
 ```
+
+### Tagging
+
+Tags are derived from the git state of the checkout:
+
+| Branch / state | Tags applied |
+|----------------|--------------|
+| Version-tagged commit (`v1.2.3`) | `v1.2.3`, `latest` |
+| `main` (untagged) | `v{last}-{date}-dev-b{N}`, `dev-latest` |
+| Other branch | `v{last}-{branch}-b{N}` |
+| Detached HEAD | `v{last}-{sha}-b{N}` |
+
+Non-release builds get an incrementing build number (`-b{N}`) so repeated builds of the same branch don't overwrite each other. The number comes from querying the registry for the highest existing `-b{N}` tag on the same base tag and adding 1; the build fails if the registry can't be reached. Release builds are immutable and never get a build number.
 
 ### FORCE_DEV_LATEST
 
