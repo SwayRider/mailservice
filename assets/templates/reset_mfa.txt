@@ -1,0 +1,18 @@
+Reset your authenticator
+
+Hi {{.Email}},
+
+A request was made to reset the authenticator (two-factor authentication) on your SwayRider account, using your account password.
+
+To set up a new authenticator, please click the link below:
+
+{{.MfaResetURL}}
+
+If the link doesn't work, you can copy and paste it into your browser's address bar.
+
+If you did not request this, your password may be compromised — please change it and contact support.
+
+—
+
+SwayRider Team
+{{.Year}} © All rights reserved.
